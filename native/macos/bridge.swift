@@ -1,6 +1,9 @@
 import Foundation
 import AppKit
 import ApplicationServices
+#if PI_COMPUTER_USE_SCREEN_CAPTURE_KIT
+import ScreenCaptureKit
+#endif
 
 struct BridgeFailure: Error {
 	let message: String
@@ -1680,12 +1683,64 @@ final class Bridge {
 	}
 
 	private func captureWindow(windowId: UInt32) throws -> [String: Any] {
-		// macOS 12 compatibility: SCScreenshotManager is macOS 14-only.
-		// Use the legacy CGWindow/screencapture paths instead.
-		if let payload = try cgWindowScreenshot(windowId: windowId) {
-			return payload
+#if PI_COMPUTER_USE_SCREEN_CAPTURE_KIT
+		if #available(macOS 14.0, *) {
+			let semaphore = DispatchSemaphore(value: 0)
+			let capturedImage = Box<CGImage?>(nil)
+			let capturedError = Box<Error?>(nil)
+
+			let task = Task {
+				defer { semaphore.signal() }
+				do {
+					if Task.isCancelled {
+						return
+					}
+					let shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+					guard let window = shareable.windows.first(where: { $0.windowID == windowId }) else {
+						throw BridgeFailure(message: "Window \(windowId) is not available for capture", code: "window_not_found")
+					}
+
+					let filter = SCContentFilter(desktopIndependentWindow: window)
+					let config = SCStreamConfiguration()
+					config.showsCursor = false
+					config.ignoreShadowsSingleWindow = true
+
+					let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+					capturedImage.value = image
+				} catch {
+					capturedError.value = error
+				}
+			}
+
+			if semaphore.wait(timeout: .now() + .seconds(8)) == .timedOut {
+				task.cancel()
+				if let payload = try legacyWindowScreenshot(windowId: windowId) {
+					return payload
+				}
+				throw BridgeFailure(message: "Screenshot timed out while capturing window \(windowId)", code: "screenshot_timeout")
+			}
+
+			if let error = capturedError.value {
+				if let payload = try legacyWindowScreenshot(windowId: windowId) {
+					return payload
+				}
+				if let failure = error as? BridgeFailure {
+					throw failure
+				}
+				throw BridgeFailure(message: "Screenshot failed: \(error.localizedDescription)", code: "screenshot_failed")
+			}
+
+			guard let image = capturedImage.value else {
+				if let payload = try legacyWindowScreenshot(windowId: windowId) {
+					return payload
+				}
+				throw BridgeFailure(message: "Screenshot failed", code: "screenshot_failed")
+			}
+
+			return try screenshotPayload(image: image, windowId: windowId)
 		}
-		if let payload = try systemScreenshotWindow(windowId: windowId) {
+#endif
+		if let payload = try legacyWindowScreenshot(windowId: windowId) {
 			return payload
 		}
 		throw BridgeFailure(message: "Screenshot failed", code: "screenshot_failed")
@@ -1705,6 +1760,16 @@ final class Bridge {
 			"height": image.height,
 			"scaleFactor": scale,
 		]
+	}
+
+	private func legacyWindowScreenshot(windowId: UInt32) throws -> [String: Any]? {
+		if let payload = try cgWindowScreenshot(windowId: windowId) {
+			return payload
+		}
+		if let payload = try systemScreenshotWindow(windowId: windowId) {
+			return payload
+		}
+		return nil
 	}
 
 	private func cgWindowScreenshot(windowId: UInt32) throws -> [String: Any]? {
@@ -1740,6 +1805,12 @@ final class Bridge {
 	}
 
 	private func currentWindowBounds(windowId: UInt32) -> CGRect? {
+#if PI_COMPUTER_USE_SCREEN_CAPTURE_KIT
+		if #available(macOS 14.0, *), let scBounds = currentWindowBoundsViaScreenCaptureKit(windowId: windowId) {
+			return scBounds
+		}
+#endif
+
 		guard let descriptions = CGWindowListCreateDescriptionFromArray([NSNumber(value: windowId)] as CFArray) as? [[String: Any]],
 			let first = descriptions.first,
 			let boundsDict = first[kCGWindowBounds as String] as? [String: Any],
@@ -1749,6 +1820,35 @@ final class Bridge {
 		}
 		return bounds
 	}
+
+#if PI_COMPUTER_USE_SCREEN_CAPTURE_KIT
+	@available(macOS 14.0, *)
+	private func currentWindowBoundsViaScreenCaptureKit(windowId: UInt32) -> CGRect? {
+		let semaphore = DispatchSemaphore(value: 0)
+		let output = Box<CGRect?>(nil)
+
+		let task = Task {
+			defer { semaphore.signal() }
+			do {
+				if Task.isCancelled {
+					return
+				}
+				let shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+				if let window = shareable.windows.first(where: { $0.windowID == windowId }) {
+					output.value = window.frame
+				}
+			} catch {
+				output.value = nil
+			}
+		}
+
+		if semaphore.wait(timeout: .now() + .seconds(2)) == .timedOut {
+			task.cancel()
+			return nil
+		}
+		return output.value
+	}
+#endif
 
 	private func mapWindowPoint(
 		windowId: UInt32,

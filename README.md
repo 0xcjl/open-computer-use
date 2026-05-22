@@ -119,7 +119,7 @@ See [docs/usage.md](./docs/usage.md) for the full workflow and tool patterns.
 
 1. The Pi extension in [`extensions/computer-use.ts`](./extensions/computer-use.ts) registers the public tools and `/computer-use` command.
 2. The TypeScript bridge in [`src/bridge.ts`](./src/bridge.ts) manages the current window, capture IDs, AX refs, fallback policy, batching, and execution metadata.
-3. The native Swift helper in [`native/macos/bridge.swift`](./native/macos/bridge.swift) talks to macOS Accessibility, ScreenCaptureKit, AppKit, and CoreGraphics.
+3. The native Swift helper in [`native/macos/bridge.swift`](./native/macos/bridge.swift) talks to macOS Accessibility, AppKit, and CoreGraphics. On macOS 14+, the modern helper also uses ScreenCaptureKit for window capture.
 
 The result is semantic-first GUI control: Pi sees useful AX targets first, falls back to screenshots only when needed, and reports whether each action stayed background-safe.
 
