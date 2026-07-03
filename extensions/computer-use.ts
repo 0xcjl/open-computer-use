@@ -145,7 +145,6 @@ const actTool = defineTool({
 		path: Type.Optional(Type.Array(Type.Object({ x: Type.Number(), y: Type.Number() }), { description: "Drag path points" })),
 		button: Type.Optional(Type.Union([Type.Literal("left"), Type.Literal("right"), Type.Literal("middle")])),
 		clickCount: Type.Optional(Type.Number({ description: "Click count for click/doubleClick" })),
-		method: Type.Optional(Type.Union([Type.Literal("ax"), Type.Literal("keyboard")], { description: "setText delivery preference; helper act still owns grounding" })),
 		ms: Type.Optional(Type.Number({ description: "Wait duration in milliseconds" })),
 		contextId,
 		window,

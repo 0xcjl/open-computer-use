@@ -30,7 +30,6 @@ export interface TypeTextParams extends WindowTargetParams {
 export interface SetTextParams extends WindowTargetParams {
 	text: string;
 	ref?: string;
-	method?: "ax" | "keyboard";
 }
 
 export interface KeypressParams extends WindowTargetParams {
@@ -108,7 +107,6 @@ export interface ActParams extends WindowTargetParams {
 	path?: DragParams["path"];
 	button?: MouseButtonName;
 	clickCount?: number;
-	method?: "ax" | "keyboard";
 	ms?: number;
 }
 
