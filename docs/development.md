@@ -51,7 +51,23 @@ Set `PI_CU_LIVE=1` only when you want live helper checks in addition to static c
 
 ## Benchmarks
 
-`scripts/cubench.mjs` is a local measurement harness for observation size, helper timing, image size, and bridge round trips.
+`../cubench` is the behavioral benchmark for computer-use clients. This repo includes a Pi client for cubench-runner:
+
+```bash
+node ../cubench/bin/cubench-runner.mjs \
+  --client ./bin/pi-cubench-client.mjs \
+  --task finder.rename.basic \
+  --seed 1 \
+  --variants ax-clean
+```
+
+Use this regression matrix for platform-seam changes:
+
+- `ax-clean`: semantic grounding through a good accessibility tree.
+- `ax-readable-not-actionable`: readable accessibility content with action fallback pressure.
+- `visual-only`: pure visual/coordinate grounding pressure.
+
+`scripts/cubench.mjs` remains a local measurement harness for observation size, helper timing, image size, and bridge round trips.
 
 ```bash
 node scripts/cubench.mjs
@@ -63,7 +79,7 @@ It writes:
 scripts/cubench-results.json
 ```
 
-Use it for changes to AX traversal, outline folding, visual evidence, action refresh, browser handling, permissions, setup, or payload size.
+Use it for changes to accessibility traversal, outline folding, visual evidence, action refresh, browser handling, permissions, setup, or payload size.
 
 ## Native helper
 
