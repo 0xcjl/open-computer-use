@@ -21,6 +21,11 @@ on:
       source_ref:
         description: "Source ref to build/publish; defaults to tag"
         required: false
+      assets_only:
+        description: "Only rebuild and replace GitHub Release helper assets; do not publish npm or edit release state"
+        required: false
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -87,21 +92,26 @@ jobs:
             exit 1
           fi
 
-      - name: Build universal helper binary
-        run: node scripts/build-native.mjs --arch universal --variant modern --no-sign
+      - name: Build universal helper binaries
+        run: |
+          node scripts/build-native.mjs --arch universal --variant modern --no-sign
+          node scripts/build-native.mjs --arch universal --variant legacy --no-sign
 
-      - name: Assemble helper app inside package tree
+      - name: Assemble helper apps inside package tree
         env:
           RELEASE_TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
           VERSION="${RELEASE_TAG#v}"
-          APP=prebuilt/macos/universal/modern/pi-computer-use.app
-          rm -rf "$APP"
-          mkdir -p "$APP/Contents/MacOS"
-          cp prebuilt/macos/universal/modern/bridge "$APP/Contents/MacOS/bridge"
-          chmod 755 "$APP/Contents/MacOS/bridge"
-          cat > "$APP/Contents/Info.plist" <<PLIST
+          for VARIANT in modern legacy; do
+            APP="prebuilt/macos/universal/${VARIANT}/pi-computer-use.app"
+            MIN_VERSION="14.0"
+            if [[ "$VARIANT" == "legacy" ]]; then MIN_VERSION="12.0"; fi
+            rm -rf "$APP"
+            mkdir -p "$APP/Contents/MacOS"
+            cp "prebuilt/macos/universal/${VARIANT}/bridge" "$APP/Contents/MacOS/bridge"
+            chmod 755 "$APP/Contents/MacOS/bridge"
+            cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
@@ -112,28 +122,31 @@ jobs:
           <key>CFBundlePackageType</key><string>APPL</string>
           <key>CFBundleShortVersionString</key><string>${VERSION}</string>
           <key>CFBundleVersion</key><string>${VERSION}</string>
-          <key>LSMinimumSystemVersion</key><string>14.0</string>
+          <key>LSMinimumSystemVersion</key><string>${MIN_VERSION}</string>
           <key>LSUIElement</key><true/>
           </dict></plist>
           PLIST
+          done
 
-      - name: Sign helper app
+      - name: Sign helper apps
         env:
           SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
         run: |
           set -euo pipefail
-          APP=prebuilt/macos/universal/modern/pi-computer-use.app
-          codesign --force --deep --timestamp --options runtime \
-            --entitlements scripts/pi-computer-use.entitlements \
-            --identifier com.injaneity.pi-computer-use \
-            --sign "$SIGN_IDENTITY" "$APP"
-          codesign --verify --strict --verbose=2 "$APP"
-          DR=$(codesign -dr - "$APP" 2>&1)
-          echo "$DR"
-          echo "$DR" | grep -q 'identifier "com.injaneity.pi-computer-use"'
-          echo "$DR" | grep -q 'certificate leaf'
+          for VARIANT in modern legacy; do
+            APP="prebuilt/macos/universal/${VARIANT}/pi-computer-use.app"
+            codesign --force --deep --timestamp --options runtime \
+              --entitlements scripts/pi-computer-use.entitlements \
+              --identifier com.injaneity.pi-computer-use \
+              --sign "$SIGN_IDENTITY" "$APP"
+            codesign --verify --strict --verbose=2 "$APP"
+            DR=$(codesign -dr - "$APP" 2>&1)
+            echo "$DR"
+            echo "$DR" | grep -q 'identifier "com.injaneity.pi-computer-use"'
+            echo "$DR" | grep -q 'certificate leaf'
+          done
 
-      - name: Notarize and staple helper app
+      - name: Notarize and staple helper apps
         if: vars.NOTARIZE == 'true'
         env:
           TEAM_ID: ${{ secrets.TEAM_ID }}
@@ -141,24 +154,28 @@ jobs:
           APP_SPECIFIC_PASSWORD: ${{ secrets.APP_SPECIFIC_PASSWORD }}
         run: |
           set -euo pipefail
-          APP=prebuilt/macos/universal/modern/pi-computer-use.app
-          /usr/bin/ditto -c -k --keepParent "$APP" notarize.zip
-          xcrun notarytool submit notarize.zip \
-            --apple-id "$APPLE_ID" \
-            --team-id "$TEAM_ID" \
-            --password "$APP_SPECIFIC_PASSWORD" \
-            --wait --timeout 20m
-          xcrun stapler staple "$APP"
-          rm notarize.zip
+          for VARIANT in modern legacy; do
+            APP="prebuilt/macos/universal/${VARIANT}/pi-computer-use.app"
+            ZIP="notarize-${VARIANT}.zip"
+            /usr/bin/ditto -c -k --keepParent "$APP" "$ZIP"
+            xcrun notarytool submit "$ZIP" \
+              --apple-id "$APPLE_ID" \
+              --team-id "$TEAM_ID" \
+              --password "$APP_SPECIFIC_PASSWORD" \
+              --wait --timeout 20m
+            xcrun stapler staple "$APP"
+            rm "$ZIP"
+          done
 
       - name: Package release assets
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          APP=prebuilt/macos/universal/modern/pi-computer-use.app
-          /usr/bin/ditto -c -k --keepParent "$APP" release-assets/pi-computer-use.app.zip
+          /usr/bin/ditto -c -k --keepParent prebuilt/macos/universal/modern/pi-computer-use.app release-assets/pi-computer-use-modern.app.zip
+          /usr/bin/ditto -c -k --keepParent prebuilt/macos/universal/modern/pi-computer-use.app release-assets/pi-computer-use.app.zip
+          /usr/bin/ditto -c -k --keepParent prebuilt/macos/universal/legacy/pi-computer-use.app release-assets/pi-computer-use-legacy.app.zip
           cd release-assets
-          shasum -a 256 pi-computer-use.app.zip > SHA256SUMS
+          shasum -a 256 pi-computer-use-modern.app.zip pi-computer-use.app.zip pi-computer-use-legacy.app.zip > SHA256SUMS
 
       - name: Upload release payload
         uses: actions/upload-artifact@v4
@@ -169,23 +186,42 @@ jobs:
           retention-days: 14
 
   stage-github-release:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.assets_only }}
     runs-on: ubuntu-latest
     needs: build-signed-helper
     permissions:
       actions: read
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
       - name: Download release payload
         uses: actions/download-artifact@v4
         with:
           name: release-assets-${{ env.RELEASE_TAG }}
           path: release-assets
 
+      - name: Validate release notes
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          RELEASE_NOTES="notes/release-v${VERSION}.md"
+          test -f "$RELEASE_NOTES"
+          grep -q '^## Features$' "$RELEASE_NOTES"
+          grep -q '^## Changelog$' "$RELEASE_NOTES"
+          grep -q '^> ' "$RELEASE_NOTES"
+
       - name: Validate release payload
         run: |
           set -euo pipefail
           cd release-assets
           test -f pi-computer-use.app.zip
+          test -f pi-computer-use-modern.app.zip
+          test -f pi-computer-use-legacy.app.zip
           test -f SHA256SUMS
           sha256sum -c SHA256SUMS
 
@@ -195,6 +231,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          RELEASE_NOTES="notes/release-v${VERSION}.md"
           cd release-assets
 
           existing_release="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null || true)"
@@ -210,14 +248,57 @@ jobs:
             --verify-tag \
             --draft \
             --title "$RELEASE_TAG" \
-            --generate-notes \
+            --notes-file "../$RELEASE_NOTES" \
             pi-computer-use.app.zip \
+            pi-computer-use-modern.app.zip \
+            pi-computer-use-legacy.app.zip \
             SHA256SUMS
 
-          expected_asset_names="$(printf '%s\n' SHA256SUMS pi-computer-use.app.zip | sort)"
+          expected_asset_names="$(printf '%s\n' SHA256SUMS pi-computer-use.app.zip pi-computer-use-modern.app.zip pi-computer-use-legacy.app.zip | sort)"
           actual_asset_names="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort)"
           if [[ "$actual_asset_names" != "$expected_asset_names" ]]; then
             echo "::error::Draft GitHub Release asset set does not match expected files."
+            diff -u <(printf '%s\n' "$expected_asset_names") <(printf '%s\n' "$actual_asset_names") || true
+            exit 1
+          fi
+
+  update-github-release-assets:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.assets_only }}
+    runs-on: ubuntu-latest
+    needs: build-signed-helper
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download release payload
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets-${{ env.RELEASE_TAG }}
+          path: release-assets
+
+      - name: Replace assets on existing GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          test -f pi-computer-use.app.zip
+          test -f pi-computer-use-modern.app.zip
+          test -f pi-computer-use-legacy.app.zip
+          test -f SHA256SUMS
+          sha256sum -c SHA256SUMS
+          gh release upload "$RELEASE_TAG" \
+            pi-computer-use.app.zip \
+            pi-computer-use-modern.app.zip \
+            pi-computer-use-legacy.app.zip \
+            SHA256SUMS \
+            --clobber
+
+          expected_asset_names="$(printf '%s\n' SHA256SUMS pi-computer-use.app.zip pi-computer-use-modern.app.zip pi-computer-use-legacy.app.zip | sort)"
+          actual_asset_names="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort)"
+          if [[ "$actual_asset_names" != "$expected_asset_names" ]]; then
+            echo "::error::GitHub Release asset set does not match expected files."
             diff -u <(printf '%s\n' "$expected_asset_names") <(printf '%s\n' "$actual_asset_names") || true
             exit 1
           fi

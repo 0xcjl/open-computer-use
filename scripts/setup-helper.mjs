@@ -2,6 +2,8 @@
 
 import { createHash } from "node:crypto";
 import { spawn, execFile as execFileCallback } from "node:child_process";
+import { createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
@@ -16,6 +18,8 @@ const helperAppExecutablePath = path.join(helperAppPath, "Contents", "MacOS", "b
 const helperSourceHashPath = path.join(helperAppPath, "Contents", "Resources", "source.sha256");
 const helperBundleId = "com.injaneity.pi-computer-use";
 const helperSourcePath = path.join(rootDir, "native", "macos", "bridge.swift");
+const packageJsonPath = path.join(rootDir, "package.json");
+const releaseRepo = "injaneity/pi-computer-use";
 
 const args = new Set(process.argv.slice(2));
 const isPostinstall = args.has("--postinstall");
@@ -68,6 +72,25 @@ function prebuiltAppPathForArch(arch, variant) {
 	return path.join(rootDir, "prebuilt", "macos", arch, variant, "pi-computer-use.app");
 }
 
+function releaseAssetNames(variant) {
+	return [
+		`pi-computer-use-${variant}.app.zip`,
+		...(variant === "modern" ? ["pi-computer-use.app.zip"] : []),
+	];
+}
+
+async function packageVersion() {
+	const packageJson = JSON.parse(await fs.readFile(packageJsonPath, "utf8"));
+	if (typeof packageJson.version !== "string" || packageJson.version.length === 0) {
+		throw new Error(`Could not read package version from ${packageJsonPath}.`);
+	}
+	return packageJson.version;
+}
+
+function githubReleaseUrl(tag, assetName) {
+	return `https://github.com/${releaseRepo}/releases/download/${tag}/${assetName}`;
+}
+
 async function exists(filePath) {
 	try {
 		await fs.access(filePath, fsConstants.F_OK);
@@ -98,6 +121,84 @@ function moduleCachePath(arch, variant) {
 async function commandOutput(command, commandArgs) {
 	const { stdout } = await execFile(command, commandArgs, { encoding: "utf8" });
 	return stdout;
+}
+
+async function downloadFile(url, outputPath) {
+	const response = await fetch(url);
+	if (!response.ok) {
+		throw new Error(`HTTP ${response.status} ${response.statusText}`);
+	}
+	if (!response.body) {
+		throw new Error("empty response body");
+	}
+	await pipeline(response.body, createWriteStream(outputPath));
+}
+
+async function releaseChecksums(tag) {
+	const response = await fetch(githubReleaseUrl(tag, "SHA256SUMS"));
+	if (!response.ok) return new Map();
+	const text = await response.text();
+	const checksums = new Map();
+	for (const line of text.split("\n")) {
+		const match = line.trim().match(/^([a-fA-F0-9]{64})\s+\*?(.+)$/);
+		if (match) checksums.set(path.basename(match[2]), match[1].toLowerCase());
+	}
+	return checksums;
+}
+
+async function verifySha256(filePath, expected) {
+	const file = await fs.readFile(filePath);
+	const actual = createHash("sha256").update(file).digest("hex");
+	if (actual !== expected.toLowerCase()) {
+		throw new Error(`SHA256 mismatch for ${path.basename(filePath)}: expected ${expected}, got ${actual}`);
+	}
+}
+
+async function findExtractedHelperApp(extractDir) {
+	const direct = path.join(extractDir, "pi-computer-use.app");
+	if (await exists(direct)) return direct;
+	const entries = await fs.readdir(extractDir, { withFileTypes: true });
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		const entryPath = path.join(extractDir, entry.name);
+		if (entry.name === "pi-computer-use.app") return entryPath;
+		const nested = await findExtractedHelperApp(entryPath);
+		if (nested) return nested;
+	}
+	return undefined;
+}
+
+async function downloadReleaseHelperApp(variant) {
+	const version = await packageVersion();
+	const tag = `v${version}`;
+	const checksums = await releaseChecksums(tag).catch(() => new Map());
+	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-computer-use-release-helper-"));
+	try {
+		for (const assetName of releaseAssetNames(variant)) {
+			const zipPath = path.join(tempDir, assetName);
+			try {
+				await downloadFile(githubReleaseUrl(tag, assetName), zipPath);
+				const expectedSha = checksums.get(assetName);
+				if (expectedSha) await verifySha256(zipPath, expectedSha);
+				const extractDir = path.join(tempDir, "extract", assetName);
+				await fs.mkdir(extractDir, { recursive: true });
+				await run("/usr/bin/ditto", ["-x", "-k", zipPath, extractDir]);
+				const appPath = await findExtractedHelperApp(extractDir);
+				if (!appPath) throw new Error(`missing pi-computer-use.app in ${assetName}`);
+				return { appPath, tempDir, assetName, tag };
+			} catch (error) {
+				await fs.rm(zipPath, { force: true }).catch(() => {});
+				if (assetName === releaseAssetNames(variant).at(-1)) {
+					throw new Error(`No signed ${variant} helper release asset found for ${tag}: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
+		}
+	} catch (error) {
+		await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {});
+		throw error;
+	}
+	await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {});
+	throw new Error(`No signed ${variant} helper release asset found for ${tag}.`);
 }
 
 async function findDeveloperIdIdentity() {
@@ -266,6 +367,23 @@ async function setup() {
 				: `[pi-computer-use] pre-signed helper app (${variant}, ${arch}) already current at ${helperAppPath}`,
 		);
 		return;
+	}
+
+	try {
+		const releaseHelper = await downloadReleaseHelperApp(variant);
+		try {
+			const installed = await installPrebuiltHelperApp(releaseHelper.appPath);
+			console.log(
+				installed
+					? `[pi-computer-use] installed signed ${variant} helper app from GitHub Release ${releaseHelper.tag} (${releaseHelper.assetName}) at ${helperAppPath}`
+					: `[pi-computer-use] signed helper app from GitHub Release ${releaseHelper.tag} (${releaseHelper.assetName}) already current at ${helperAppPath}`,
+			);
+		} finally {
+			await fs.rm(releaseHelper.tempDir, { force: true, recursive: true }).catch(() => {});
+		}
+		return;
+	} catch (error) {
+		console.warn(`[pi-computer-use] signed ${variant} helper release download unavailable: ${error instanceof Error ? error.message : String(error)}`);
 	}
 
 	if (prebuiltExists) {
