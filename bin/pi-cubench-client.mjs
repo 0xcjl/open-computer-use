@@ -15,6 +15,12 @@ let semanticActions = 0;
 let coordinateActions = 0;
 
 const ctx = {
+	cwd: process.cwd(),
+	hasUI: false,
+	ui: {
+		select: async () => "Cancel",
+		notify: () => undefined,
+	},
 	sessionManager: { getBranch: () => [] },
 };
 

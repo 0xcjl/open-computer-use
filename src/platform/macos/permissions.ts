@@ -1,16 +1,53 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { ensurePermissions, type PermissionStatus } from "../../permissions.ts";
+import { ensurePermissions, type PermissionKind, type PermissionStatus } from "../../permissions.ts";
 import { toBoolean, toFiniteNumber, toOptionalString } from "../coerce.ts";
 import type { PlatformReadyState } from "../types.ts";
 import { HELPER_APP_PATH, macosHelper } from "./helper.ts";
+
+const GRANT_INSTRUCTIONS =
+	"Grant Accessibility and Screen Recording to pi-computer-use.app in System Settings → Privacy & Security. " +
+	"Screen Recording lets the agent see the window; Accessibility lets it interact with the window.";
+
+const macosPermissionKinds = [
+	{ kind: "accessibility" as const, openOption: "Open Accessibility Settings (missing)" },
+	{ kind: "screenRecording" as const, openOption: "Open Screen Recording Settings (missing)" },
+];
+
+function permissionStatusSummary(status: PermissionStatus): string {
+	const lines = [
+		`Accessibility: ${status.accessibility ? "granted" : "missing"}`,
+		`Screen Recording: ${status.screenRecording ? "granted" : "missing"}`,
+	];
+	if (status.screenRecordingPreflight && !status.screenRecording) {
+		lines.push(
+			"(Screen Recording reads granted in the TCC database but a live capture probe failed — " +
+			"the grant likely belongs to a different app identity, or the helper needs a restart.)",
+		);
+	}
+	return lines.join("; ");
+}
+
+function permissionPrompt(status: PermissionStatus, helperPath: string, hint?: string): string {
+	return [
+		"pi-computer-use needs macOS permissions for its helper app.",
+		permissionStatusSummary(status),
+		"",
+		`Helper: pi-computer-use.app (${helperPath})`,
+		hint,
+		"",
+		"pi-computer-use.app is already listed in the pane(s) — enable its toggle, then choose Recheck.",
+	].filter(Boolean).join("\n");
+}
+
+function missingPermissionMessage(kinds: PermissionKind[]): string {
+	return `Still missing after restart: ${kinds.join(" and ")}.`;
+}
 
 async function checkPermissions(signal?: AbortSignal): Promise<PermissionStatus> {
 	const result = await macosHelper.command<any>("checkPermissions", {}, { signal });
 	const rawSource = result?.source;
 	return {
 		accessibility: toBoolean(result?.accessibility),
-		// Authoritative: the helper's live ScreenCaptureKit probe (falls back
-		// to the plain boolean when talking to a protocol-1 helper).
 		screenRecording: toBoolean(result?.screenRecordingCapturable ?? result?.screenRecording),
 		screenRecordingPreflight: toBoolean(result?.screenRecordingPreflight ?? result?.screenRecording),
 		source: rawSource && typeof rawSource === "object"
@@ -21,7 +58,7 @@ async function checkPermissions(signal?: AbortSignal): Promise<PermissionStatus>
 				executablePath: toOptionalString(rawSource.executablePath),
 				parentPath: toOptionalString(rawSource.parentPath),
 				parentBundleId: toOptionalString(rawSource.parentBundleId),
-				macOS: toOptionalString(rawSource.macOS),
+				os: toOptionalString(rawSource.macOS),
 			}
 			: undefined,
 	};
@@ -64,6 +101,15 @@ export async function ensureMacosReady(
 		permissionStatus = await ensurePermissions(
 			ctx,
 			{
+				kinds: macosPermissionKinds,
+				copy: {
+					nonInteractiveError: (helperPath) => `pi-computer-use setup requires an interactive session. Start pi in interactive mode. ${GRANT_INSTRUCTIONS}\nHelper path: ${helperPath}`,
+					statusSummary: permissionStatusSummary,
+					prompt: permissionPrompt,
+					incompleteError: (helperPath) => `pi-computer-use setup is incomplete. ${GRANT_INSTRUCTIONS} Helper path: ${helperPath}`,
+					readyMessage: "pi-computer-use is ready.",
+					stillMissing: missingPermissionMessage,
+				},
 				checkPermissions: (permissionSignal) => checkPermissions(permissionSignal ?? signal),
 				registerPermissions: (permissionSignal) => registerPermissions(permissionSignal ?? signal),
 				openPermissionPane: async (kind, permissionSignal) => {
