@@ -1,5 +1,5 @@
 import { parseLookResponse, type LookResponse } from "../../outline.ts";
-import type { FramePoints, HelperActResult, PlatformApp, PlatformFocusWindowResult, PlatformFrontmostResult, PlatformWindow } from "../types.ts";
+import type { FramePoints, HelperActResult, PlatformActRequest, PlatformApp, PlatformFocusWindowResult, PlatformFrontmostResult, PlatformObserveRequest, PlatformTarget, PlatformWindow, PlatformWindowQuery } from "../types.ts";
 import { macosHelper } from "./helper.ts";
 
 function toBoolean(value: unknown): boolean {
@@ -79,8 +79,9 @@ export const macosBackend = {
 		return parseApps(await macosHelper.command<unknown>("listApps", {}, { signal }));
 	},
 
-	async listWindows(pid: number, signal?: AbortSignal): Promise<PlatformWindow[]> {
-		return parseWindows(await macosHelper.command<unknown>("listWindows", { pid }, { signal }));
+	async listWindows(query: PlatformWindowQuery, signal?: AbortSignal): Promise<PlatformWindow[]> {
+		if (!Number.isFinite(query.pid)) throw new Error("macOS listWindows requires pid.");
+		return parseWindows(await macosHelper.command<unknown>("listWindows", { pid: Math.trunc(query.pid!) }, { signal }));
 	},
 
 	async getFrontmost(signal?: AbortSignal): Promise<PlatformFrontmostResult> {
@@ -98,21 +99,21 @@ export const macosBackend = {
 		};
 	},
 
-	async focusWindow(target: { pid: number; windowId: number; windowRef?: string }, signal?: AbortSignal): Promise<PlatformFocusWindowResult> {
-		return await macosHelper.command<PlatformFocusWindowResult>("focusWindow", target, { signal });
+	async focusWindow(target: PlatformTarget, signal?: AbortSignal): Promise<PlatformFocusWindowResult> {
+		return await macosHelper.command<PlatformFocusWindowResult>("focusWindow", { ...target }, { signal });
 	},
 
-	async look(windowId: number, options: { readText: "auto" | "always" | "never"; scopeRef?: string; maxDimension?: number }, signal?: AbortSignal): Promise<LookResponse> {
+	async observe(request: PlatformObserveRequest, signal?: AbortSignal): Promise<LookResponse> {
 		return parseLookResponse(await macosHelper.command("look", {
-			windowId,
-			maxDimension: options.maxDimension,
-			readText: options.readText,
-			scopeRef: options.scopeRef,
+			windowId: request.target.windowId,
+			maxDimension: request.maxDimension,
+			readText: request.readText,
+			scopeRef: request.scopeRef,
 		}, { timeoutMs: 33_000, signal }));
 	},
 
-	async act(args: Record<string, unknown>, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
-		return await macosHelper.command<HelperActResult>("act", args, options);
+	async act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
+		return await macosHelper.command<HelperActResult>("act", { ...request }, options);
 	},
 
 	async readText(args: Record<string, unknown>, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<unknown> {

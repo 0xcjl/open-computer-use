@@ -60,10 +60,10 @@ export async function ensureMacosReady(
 	const helperDiagnostics: PlatformDiagnostics = { ...rawDiagnostics, os: rawDiagnostics.macOS };
 
 	const now = Date.now();
+	const cachedStatus = state.permissionStatus as PermissionStatus | undefined;
 	const canUseCachedPermissions =
-		state.permissionStatus &&
-		state.permissionStatus.accessibility &&
-		state.permissionStatus.screenRecording &&
+		cachedStatus?.accessibility &&
+		cachedStatus.screenRecording &&
 		now - state.lastPermissionCheckAt < 2_000;
 	if (canUseCachedPermissions) {
 		return { ...state, helperDiagnostics };

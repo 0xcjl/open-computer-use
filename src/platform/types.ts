@@ -1,5 +1,4 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { PermissionStatus } from "../permissions.ts";
 import type { LookResponse } from "../outline.ts";
 
 export type PlatformName = "macos" | "windows" | "linux";
@@ -21,9 +20,17 @@ export interface PlatformDiagnostics {
 }
 
 export interface PlatformReadyState {
-	permissionStatus?: PermissionStatus;
+	permissionStatus?: unknown;
 	lastPermissionCheckAt: number;
 	helperDiagnostics?: PlatformDiagnostics;
+}
+
+export interface PlatformWindowQuery {
+	app?: string;
+	bundleId?: string;
+	pid?: number;
+	windowRef?: string;
+	windowTitle?: string;
 }
 
 export interface PlatformApp {
@@ -84,15 +91,37 @@ export interface HelperActResult {
 	error?: { code?: string; message?: string; whatIsThere?: unknown };
 }
 
+export interface PlatformTarget {
+	pid?: number;
+	windowId?: number;
+	windowRef?: string;
+}
+
+export interface PlatformObserveRequest {
+	target: PlatformTarget;
+	readText: "auto" | "always" | "never";
+	scopeRef?: string;
+	maxDimension?: number;
+}
+
+export interface PlatformActRequest {
+	lookId: string;
+	pid?: number;
+	target: unknown;
+	action: string;
+	policy: string;
+	params: Record<string, unknown>;
+}
+
 export interface ComputerUsePlatformBackend {
 	name: PlatformName;
 	ensureReady(ctx: ExtensionContext, state: PlatformReadyState, signal?: AbortSignal): Promise<PlatformReadyState>;
 	listApps(signal?: AbortSignal): Promise<PlatformApp[]>;
-	listWindows(pid: number, signal?: AbortSignal): Promise<PlatformWindow[]>;
+	listWindows(query: PlatformWindowQuery, signal?: AbortSignal): Promise<PlatformWindow[]>;
 	getFrontmost(signal?: AbortSignal): Promise<PlatformFrontmostResult>;
-	focusWindow(target: { pid: number; windowId: number; windowRef?: string }, signal?: AbortSignal): Promise<PlatformFocusWindowResult>;
-	look(windowId: number, options: { readText: "auto" | "always" | "never"; scopeRef?: string; maxDimension?: number }, signal?: AbortSignal): Promise<LookResponse>;
-	act(args: Record<string, unknown>, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult>;
+	focusWindow(target: PlatformTarget, signal?: AbortSignal): Promise<PlatformFocusWindowResult>;
+	observe(request: PlatformObserveRequest, signal?: AbortSignal): Promise<LookResponse>;
+	act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult>;
 	readText(args: Record<string, unknown>, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<unknown>;
 	waitFor(args: Record<string, unknown>, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<unknown>;
 	isBrowserApp(appName: string, bundleId?: string): boolean;

@@ -10,7 +10,6 @@ import { cdpEvaluateForContext, cdpNavigateContext, cdpScrollForContext, cdpSnap
 import { getComputerUseConfig, isBrowserUseEnabled, isStrictAxMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
 import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, restoreOutline, searchOutline, serializeOutline, serializeOutlineNode, type LookResponse, type Outline, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode } from "./outline.ts";
-import type { PermissionStatus } from "./permissions.ts";
 import { AGENT_TOOL_NAMES, type ActParams, type DragParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type KeypressParams, type LaunchBrowserContextParams, type ListWindowsParams, type MouseButtonName, type MoveMouseParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type ScrollParams, type SearchUiParams, type SetTextParams, type SnapshotParams, type TypeTextParams, type WaitForParams, type WaitParams, type WindowSelector, type WindowTargetParams } from "./contract.ts";
 import { currentPlatformBackend } from "./platform/index.ts";
 import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformWindow as HelperWindow } from "./platform/types.ts";
@@ -300,7 +299,7 @@ interface RuntimeState {
 	pendingBrowserAddress?: PendingBrowserAddress;
 	managedBrowser?: ChildProcess;
 	queueTail: Promise<void>;
-	permissionStatus?: PermissionStatus;
+	permissionStatus?: unknown;
 	helperDiagnostics?: PlatformDiagnostics;
 	lastPermissionCheckAt: number;
 }
@@ -632,7 +631,7 @@ async function listApps(signal?: AbortSignal): Promise<HelperApp[]> {
 }
 
 async function listWindows(pid: number, signal?: AbortSignal): Promise<HelperWindow[]> {
-	return await currentPlatformBackend.listWindows(pid, signal);
+	return await currentPlatformBackend.listWindows({ pid }, signal);
 }
 
 function appMatchesWindowQuery(app: HelperApp, query: ListWindowsParams): boolean {
@@ -1191,8 +1190,13 @@ function captureForLook(look: LookResponse): CurrentCapture {
 	};
 }
 
-async function performLook(windowId: number, options: { readText: "auto" | "always" | "never"; scopeRef?: string; maxDimension?: number }, signal?: AbortSignal): Promise<LookResponse> {
-	return await currentPlatformBackend.look(windowId, options, signal);
+async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; scopeRef?: string; maxDimension?: number }, signal?: AbortSignal): Promise<LookResponse> {
+	return await currentPlatformBackend.observe({
+		target: nativeWindowRequest(target),
+		readText: options.readText,
+		scopeRef: options.scopeRef,
+		maxDimension: options.maxDimension,
+	}, signal);
 }
 
 function noteWindowForTarget(target: ResolvedTarget | CurrentTarget, look?: LookResponse) {
@@ -1211,7 +1215,7 @@ function actTargetPublicRef(params: { ref?: string }): string | undefined {
 async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION): Promise<CaptureResult> {
 	let target = await resolveCurrentTarget(signal);
 	target = await ensureTargetWindowId(target, signal);
-	const look = await performLook(target.windowId, { maxDimension, readText }, signal);
+	const look = await performLook(target, { maxDimension, readText }, signal);
 	const outline = look.parsedOutline!;
 	const capture = captureForLook(look);
 
@@ -1236,7 +1240,7 @@ async function refreshCurrentTargetAfterAct(target: ResolvedTarget, targetRef: s
 	if (!outline || !targetRef) return await captureCurrentTarget(signal);
 	const targetNode = nodeByRef(outline, targetRef);
 	if (!targetNode?.wireRef || targetNode.pictureOnly) return await captureCurrentTarget(signal);
-	const look = await performLook(target.windowId, { maxDimension: AUTO_IMAGE_MAX_DIMENSION, readText: "auto", scopeRef: targetNode.wireRef }, signal);
+	const look = await performLook(target, { maxDimension: AUTO_IMAGE_MAX_DIMENSION, readText: "auto", scopeRef: targetNode.wireRef }, signal);
 	graftScopedOutline(outline, targetNode.ref, look.parsedOutline!);
 	outline.lookId = look.lookId;
 	const capture = captureForLook(look);
@@ -1872,7 +1876,7 @@ async function performExpandUi(params: ExpandUiParams, signal?: AbortSignal): Pr
 	const regionChanged = Boolean(regionKey && runtimeState.currentNote?.regions.some((region) => region.key === regionKey && region.status === "changed"));
 	if (target.truncated || regionChanged) {
 		const currentTarget = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
-		const scoped = await performLook(currentTarget.windowId, { readText: "auto", scopeRef: wireRefForNode(target), maxDimension: 1 }, signal);
+		const scoped = await performLook(currentTarget, { readText: "auto", scopeRef: wireRefForNode(target), maxDimension: 1 }, signal);
 		target = graftScopedOutline(outline, target.ref, scoped.parsedOutline!);
 	}
 	const folded = foldToBudget(outline, { maxDepth: depth, maxNodes: 150 }, [target.ref]);
