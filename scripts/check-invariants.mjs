@@ -57,7 +57,7 @@ check("INV-3 static scene fusion and auto-confirm absent", () => {
 });
 
 check("INV-4 static act owns input command surface", () => {
-	assert(/interface HelperActResult[\s\S]*outcome: ActOutcome/.test(ts), "TS helper act result does not carry outcome");
+	assert(srcFiles.some(([, text]) => /interface HelperActResult[\s\S]*outcome: ActOutcome/.test(text)), "TS helper act result does not carry outcome");
 	for (const [file, text] of srcFiles) {
 		assert(!/verifiedCoordinateClick|coordinateStateSignature/.test(text), `deleted verification helper appears in src/${file}`);
 	}
@@ -97,8 +97,8 @@ check("INV-8 deleted architecture-v1 identifiers absent", () => {
 });
 
 check("INV-5 listWindows pairing parsed", () => {
-	assert(/interface HelperWindow[\s\S]*pairing:/.test(ts), "HelperWindow lacks required pairing field");
-	assert(/function parseWindows[\s\S]*pairing[\s\S]*confidence[\s\S]*score/.test(ts), "listWindows parser does not parse pairing");
+	assert(srcFiles.some(([, text]) => /interface (HelperWindow|MacosWindow|PlatformWindow)[\s\S]*pairing:/.test(text)), "HelperWindow lacks required pairing field");
+	assert(srcFiles.some(([, text]) => /function parseWindows[\s\S]*pairing[\s\S]*confidence[\s\S]*score/.test(text)), "listWindows parser does not parse pairing");
 });
 
 function enclosingFunctionName(text, index) {

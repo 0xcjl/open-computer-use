@@ -1,156 +1,25 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdir } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { cdpEvaluateForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeForContext, listCdpPageContexts, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isStrictAxMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
-import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, parseLookResponse, restoreOutline, searchOutline, serializeOutline, serializeOutlineNode, type LookResponse, type Outline, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode } from "./outline.ts";
-import { ensurePermissions, type PermissionStatus } from "./permissions.ts";
-
-type WindowSelector = string | number;
-type ImageMode = "auto" | "always" | "never";
+import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, restoreOutline, searchOutline, serializeOutline, serializeOutlineNode, type LookResponse, type Outline, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode } from "./outline.ts";
+import type { PermissionStatus } from "./permissions.ts";
+import { AGENT_TOOL_NAMES, type ActParams, type DragParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type KeypressParams, type LaunchBrowserContextParams, type ListWindowsParams, type MouseButtonName, type MoveMouseParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type ScrollParams, type SearchUiParams, type SetTextParams, type SnapshotParams, type TypeTextParams, type WaitForParams, type WaitParams, type WindowSelector, type WindowTargetParams } from "./contract.ts";
+import { currentPlatformBackend } from "./platform/index.ts";
+import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformWindow as HelperWindow } from "./platform/types.ts";
+export type { ActParams, DragParams, EvaluateBrowserParams, ExpandUiParams, ImageMode, InspectUiParams, KeypressParams, LaunchBrowserContextParams, ListWindowsParams, MouseButtonName, MoveMouseParams, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, ScrollParams, SearchUiParams, SetTextParams, SnapshotParams, TypeTextParams, WaitForParams, WaitParams, WindowSelector, WindowTargetParams } from "./contract.ts";
 
 interface StateTargetSnapshot {
 	pid: number;
 	windowId: number;
 	windowRef?: string;
-}
-
-export interface ObserveTargetParams {
-	app?: string;
-	windowTitle?: string;
-	window?: WindowSelector;
-	image?: ImageMode;
-}
-
-export interface ListWindowsParams {
-	app?: string;
-	bundleId?: string;
-	pid?: number;
-}
-
-interface WindowTargetParams {
-	contextId?: string;
-	window?: WindowSelector;
-	stateId?: string;
-	image?: ImageMode;
-	responseMode?: "state" | "confirmation";
-}
-
-export interface TypeTextParams extends WindowTargetParams {
-	text: string;
-}
-
-export interface SetTextParams extends WindowTargetParams {
-	text: string;
-	ref?: string;
-	method?: "ax" | "keyboard";
-}
-
-export interface KeypressParams extends WindowTargetParams {
-	keys: string[];
-}
-
-export interface ScrollParams extends WindowTargetParams {
-	x?: number;
-	y?: number;
-	ref?: string;
-	scrollX?: number;
-	scrollY?: number;
-}
-
-export interface MoveMouseParams extends WindowTargetParams {
-	x: number;
-	y: number;
-}
-
-export interface DragParams extends WindowTargetParams {
-	path?: Array<{ x: number; y: number } | [number, number]>;
-	ref?: string;
-}
-
-export interface NavigateBrowserParams extends WindowTargetParams {
-	url: string;
-}
-
-export interface LaunchBrowserContextParams {
-	browser?: "helium" | "chrome";
-	url?: string;
-	port?: number;
-}
-
-export interface EvaluateBrowserParams {
-	contextId: string;
-	expression: string;
-}
-
-export interface WaitParams extends WindowTargetParams {
-	ms?: number;
-}
-
-export interface ObserveParams extends ObserveTargetParams {
-	mode?: "semantic" | "visual" | "fused";
-}
-
-export interface SearchUiParams extends WindowTargetParams {
-	text?: string;
-	role?: string;
-	action?: string;
-	source?: string;
-	limit?: number;
-}
-
-export interface ExpandUiParams extends WindowTargetParams {
-	ref: string;
-	depth?: number;
-}
-
-export interface InspectUiParams extends WindowTargetParams {
-	ref: string;
-	includeRaw?: boolean;
-}
-
-export interface ActParams extends WindowTargetParams {
-	action: "press" | "click" | "doubleClick" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse" | "wait";
-	ref?: string;
-	x?: number;
-	y?: number;
-	text?: string;
-	keys?: string[];
-	scrollX?: number;
-	scrollY?: number;
-	path?: DragParams["path"];
-	button?: MouseButtonName;
-	clickCount?: number;
-	method?: "ax" | "keyboard";
-	ms?: number;
-}
-
-export interface SnapshotParams {
-	contextId: string;
-	scopeRef?: string;
-	maxNodes?: number;
-	maxDepth?: number;
-	image?: ImageMode;
-}
-
-export interface ReadTextParams extends WindowTargetParams {
-	ref?: string;
-	offset?: number;
-	limit?: number;
-}
-
-export interface WaitForParams extends WindowTargetParams {
-	text?: string;
-	role?: string;
-	gone?: boolean;
-	timeoutMs?: number;
 }
 
 export interface CurrentTarget {
@@ -178,23 +47,9 @@ interface ActivationFlags {
 }
 
 type ExecutionVariant = "stealth" | "default";
-type NativeInputDelivery = "pid" | "hid";
 type ActionDelivery = "ax" | NativeInputDelivery;
 type DeliveryPolicy = "ax_only" | "background" | "default";
 type ActOutcome = "worked" | "didnt" | "unknown";
-
-interface HelperActPerformed {
-	grounding?: "description" | "coordinates";
-	delivery?: "ax" | "hid" | "pid";
-	refound?: boolean;
-}
-
-interface HelperActResult {
-	outcome: ActOutcome;
-	performed?: HelperActPerformed;
-	evidence?: Record<string, unknown>;
-	error?: { code?: string; message?: string; whatIsThere?: unknown };
-}
 
 interface ExecutionTrace {
 	strategy:
@@ -212,20 +67,6 @@ interface ExecutionTrace {
 	performed?: HelperActPerformed;
 	evidence?: Record<string, unknown>;
 	error?: HelperActResult["error"];
-}
-
-interface HelperDiagnostics {
-	protocolVersion: number;
-	pid: number;
-	parentPid?: number;
-	parentAppName?: string;
-	parentBundleId?: string;
-	parentPath?: string;
-	executablePath?: string;
-	macOS?: string;
-	arch?: string;
-	accessibility?: boolean;
-	screenRecording?: boolean;
 }
 
 export interface ComputerUseDetails {
@@ -257,7 +98,7 @@ export interface ComputerUseDetails {
 		browser_use: boolean;
 		stealth_mode: boolean;
 	};
-	helper?: HelperDiagnostics;
+	helper?: PlatformDiagnostics;
 	status?: "ok";
 	axDiagnostics?: {
 		reason?: string;
@@ -290,7 +131,7 @@ export interface ListAppsDetails {
 		browser_use: boolean;
 		stealth_mode: boolean;
 	};
-	helper?: HelperDiagnostics;
+	helper?: PlatformDiagnostics;
 }
 
 export interface ListWindowsDetails {
@@ -411,51 +252,6 @@ export interface OutlineToolDetails {
 	note?: WindowNote;
 }
 
-interface HelperApp {
-	appName: string;
-	bundleId?: string;
-	pid: number;
-	isFrontmost?: boolean;
-}
-
-interface FramePoints {
-	x: number;
-	y: number;
-	w: number;
-	h: number;
-}
-
-interface HelperWindow {
-	windowId?: number;
-	windowRef?: string;
-	title: string;
-	role?: string;
-	subrole?: string;
-	pairing: { confidence: "exact" | "high" | "low"; score: number };
-	framePoints: FramePoints;
-	scaleFactor: number;
-	isMinimized: boolean;
-	isOnscreen: boolean;
-	isMain: boolean;
-	isFocused: boolean;
-	isModal: boolean;
-	sheetCount: number;
-}
-
-interface FrontmostResult {
-	appName: string;
-	bundleId?: string;
-	pid: number;
-	windowTitle?: string;
-	windowId?: number;
-}
-
-interface FocusWindowResult {
-	focused: boolean;
-	alreadyFocused?: boolean;
-	reason?: string;
-}
-
 interface ResolvedTarget extends CurrentTarget {
 	framePoints: FramePoints;
 	scaleFactor: number;
@@ -502,118 +298,37 @@ interface RuntimeState {
 	nextWindowRefIndex: number;
 	allowNextTypeTextAxReplacement?: boolean;
 	pendingBrowserAddress?: PendingBrowserAddress;
-	daemonAvailable?: boolean;
 	managedBrowser?: ChildProcess;
-	requestSequence: number;
 	queueTail: Promise<void>;
 	permissionStatus?: PermissionStatus;
-	helperDiagnostics?: HelperDiagnostics;
+	helperDiagnostics?: PlatformDiagnostics;
 	lastPermissionCheckAt: number;
-	helperInstallChecked: boolean;
 }
 
-type MouseButtonName = "left" | "right" | "middle";
-
-const TOOL_NAMES = new Set([
-	"list_apps",
-	"list_windows",
-	"list_contexts",
-	"snapshot",
-	"read_text",
-	"wait_for",
-	"observe",
-	"search_ui",
-	"expand_ui",
-	"inspect_ui",
-	"act",
-	"navigate_browser",
-	"evaluate_browser",
-	"launch_browser_context",
-]);
 
 const MISSING_TARGET_ERROR = "No current controlled window. Call observe first to choose a target window.";
 const CURRENT_TARGET_GONE_ERROR =
 	"The current controlled window is no longer available. Call observe to choose a new target window.";
-const NON_MACOS_ERROR = "pi-computer-use currently supports macOS 12+ only.";
 
 const COMMAND_TIMEOUT_MS = 15_000;
-const HELPER_PROTOCOL_VERSION = 3;
 
 const SCREENSHOT_TIMEOUT_MS = 25_000;
-const HELPER_SETUP_TIMEOUT_MS = 60_000;
 const ACTION_SETTLE_MS = 280;
 const DEFAULT_WAIT_MS = 1_000;
 
-const BROWSER_BUNDLE_IDS = new Set([
-	"com.apple.Safari",
-	"com.google.Chrome",
-	"org.chromium.Chromium",
-	"company.thebrowser.Browser",
-	"com.brave.Browser",
-	"com.microsoft.edgemac",
-	"com.vivaldi.Vivaldi",
-	"net.imput.helium",
-	"org.mozilla.firefox",
-]);
-const BROWSER_APP_NAMES = new Set([
-	"safari",
-	"google chrome",
-	"chrome",
-	"chromium",
-	"arc",
-	"brave browser",
-	"brave",
-	"microsoft edge",
-	"edge",
-	"vivaldi",
-	"helium",
-	"firefox",
-]);
-const CHROME_FAMILY_BUNDLE_IDS = new Set([
-	"com.google.Chrome",
-	"org.chromium.Chromium",
-	"company.thebrowser.Browser",
-	"com.brave.Browser",
-	"com.microsoft.edgemac",
-	"com.vivaldi.Vivaldi",
-	"net.imput.helium",
-]);
-const CHROME_FAMILY_APP_NAMES = new Set([
-	"google chrome",
-	"chrome",
-	"chromium",
-	"arc",
-	"brave browser",
-	"brave",
-	"microsoft edge",
-	"edge",
-	"vivaldi",
-	"helium",
-]);
-const BROWSER_WINDOW_OPEN_TIMEOUT_MS = 10_000;
 const BROWSER_CONTEXT_PREFIX = "browser:";
 const DESKTOP_CONTEXT_PREFIX = "desktop:";
 const MANAGED_BROWSER_READY_TIMEOUT_MS = 15_000;
 const AUTO_IMAGE_MAX_DIMENSION = 900;
 const EXPLICIT_IMAGE_MAX_DIMENSION = 1_600;
-const AX_TARGET_TEXT_PREVIEW_CHARS = 240;
+const OUTLINE_TARGET_TEXT_PREVIEW_CHARS = 240;
 const BROWSER_SNAPSHOT_TEXT_PREVIEW_CHARS = 2_000;
 const HELIUM_EXECUTABLE = "/Applications/Helium.app/Contents/MacOS/Helium";
 const CHROME_EXECUTABLE = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
-const HELPER_BUNDLE_ID = "com.injaneity.pi-computer-use";
-const HELPER_APP_PATH = "/Applications/pi-computer-use.app";
-const HELPER_APP_EXECUTABLE_PATH = path.join(HELPER_APP_PATH, "Contents", "MacOS", "bridge");
-const HELPER_SOCKET_PATH = path.join(os.homedir(), "Library", "Caches", "pi-computer-use", "bridge.sock");
-
-const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const SETUP_HELPER_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "setup-helper.mjs");
-
 const runtimeState: RuntimeState = {
-	requestSequence: 0,
 	queueTail: Promise.resolve(),
 	lastPermissionCheckAt: 0,
-	helperInstallChecked: false,
 	allowNextTypeTextAxReplacement: false,
 	browserSnapshots: new Map(),
 	windowRefs: new Map(),
@@ -621,45 +336,6 @@ const runtimeState: RuntimeState = {
 	windowWriteQueues: new Map(),
 	nextWindowRefIndex: 1,
 };
-
-class HelperTransportError extends Error {
-	constructor(message: string) {
-		super(message);
-		this.name = "HelperTransportError";
-	}
-}
-
-class HelperCommandError extends Error {
-	readonly code?: string;
-
-	constructor(message: string, code?: string) {
-		super(message);
-		this.name = "HelperCommandError";
-		this.code = code;
-	}
-}
-
-const BROWSER_JAVASCRIPT_APPLE_EVENTS_HINT = [
-	"Browser JavaScript Apple Events are disabled for the target browser.",
-	"Ask the user to enable \"Allow JavaScript from Apple Events\" in the browser's developer menu, then retry the browser action.",
-].join(" ");
-
-function isBrowserJavaScriptAppleEventsErrorMessage(message: string): boolean {
-	return /not allowed to send javascript commands/i.test(message)
-		|| /executing javascript through applescript is turned off/i.test(message)
-		|| /allow javascript from apple events/i.test(message)
-		|| /enable javascript from apple events/i.test(message)
-		|| (/javascript/i.test(message) && /apple events/i.test(message));
-}
-
-function appendBrowserJavaScriptAppleEventsHint(error: Error): Error {
-	if (!isBrowserJavaScriptAppleEventsErrorMessage(error.message) || error.message.includes(BROWSER_JAVASCRIPT_APPLE_EVENTS_HINT)) {
-		return error;
-	}
-	const enhanced = new Error(`${error.message}\n\n${BROWSER_JAVASCRIPT_APPLE_EVENTS_HINT}`);
-	enhanced.name = error.name;
-	return enhanced;
-}
 
 function normalizeError(error: unknown): Error {
 	return error instanceof Error ? error : new Error(String(error));
@@ -883,7 +559,7 @@ function outlineNodeByRef(ref: string): OutlineNode {
 
 function wireRefForNode(node: OutlineNode): string {
 	if (node.pictureOnly || !node.wireRef) {
-		throw new Error(`Outline ref '${node.ref}' is pictureOnly and has no AX element. It can be clicked by coordinates, but AX-only actions are not available.`);
+		throw new Error(`Outline ref '${node.ref}' is pictureOnly and has no semantic element. It can be clicked by coordinates, but semantic-only actions are not available.`);
 	}
 	return node.wireRef;
 }
@@ -903,7 +579,7 @@ function imageFallbackReason(
 	if (labeled * 3 < outline.nodes.length) {
 		return { reason: "unlabeled_ax_targets", message: "Most outline nodes are unlabeled, so the look image is attached for context." }
 	}
-	if (tool === "wait" && isBrowserApp(result.target.appName, result.target.bundleId)) {
+	if (tool === "wait" && currentPlatformBackend.isBrowserApp(result.target.appName, result.target.bundleId)) {
 		return { reason: "browser_wait_verification", message: "Browser content may have changed visually during wait, so an image is attached for fallback." }
 	}
 	return undefined
@@ -929,349 +605,34 @@ async function isExecutable(filePath: string): Promise<boolean> {
 	}
 }
 
-async function runProcess(
-	command: string,
-	args: string[],
-	timeoutMs: number,
-	signal?: AbortSignal,
-	env?: NodeJS.ProcessEnv,
-): Promise<void> {
-	throwIfAborted(signal);
-
-	await new Promise<void>((resolve, reject) => {
-		const child = spawn(command, args, {
-			stdio: ["ignore", "pipe", "pipe"],
-			env,
-		});
-
-		let stderr = "";
-		let stdout = "";
-
-		const timer = setTimeout(() => {
-			child.kill("SIGTERM");
-			cleanup();
-			reject(new Error(`Command timed out after ${timeoutMs}ms: ${command} ${args.join(" ")}`));
-		}, timeoutMs);
-
-		const onAbort = () => {
-			child.kill("SIGTERM");
-			cleanup();
-			reject(new Error("Operation aborted."));
-		};
-
-		const cleanup = () => {
-			clearTimeout(timer);
-			signal?.removeEventListener("abort", onAbort);
-		};
-
-		child.stdout.on("data", (chunk) => {
-			stdout += String(chunk);
-		});
-
-		child.stderr.on("data", (chunk) => {
-			stderr += String(chunk);
-		});
-
-		child.on("error", (error) => {
-			cleanup();
-			reject(error);
-		});
-
-		child.on("close", (code) => {
-			cleanup();
-			if (code === 0) {
-				resolve();
-				return;
-			}
-			const output = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
-			reject(new Error(`Command failed (${code}): ${command} ${args.join(" ")}\n${output}`.trim()));
-		});
-
-		signal?.addEventListener("abort", onAbort, { once: true });
-	});
-}
-
-
-async function ensureHelperInstalled(signal?: AbortSignal): Promise<void> {
-	if ((await isExecutable(HELPER_APP_EXECUTABLE_PATH)) && runtimeState.helperInstallChecked) return;
-
-	// process.execPath may be an Electron binary when this module runs inside an
-	// Electron main process. Force ELECTRON_RUN_AS_NODE so the helper script runs
-	// as plain Node instead of launching a GUI Electron app (which adds a dock
-	// icon and never exits). No-op for a regular Node executable.
-	await runProcess(process.execPath, [SETUP_HELPER_SCRIPT, "--runtime"], HELPER_SETUP_TIMEOUT_MS, signal, {
-		...process.env,
-		ELECTRON_RUN_AS_NODE: "1",
-	});
-	runtimeState.helperInstallChecked = true;
-
-	if (!(await isExecutable(HELPER_APP_EXECUTABLE_PATH))) {
-		throw new Error(`Failed to install pi-computer-use helper app at ${HELPER_APP_PATH}.`);
-	}
-}
-
-
-async function launchHelperDaemon(signal?: AbortSignal): Promise<void> {
-	await mkdir(path.dirname(HELPER_SOCKET_PATH), { recursive: true });
-	await runProcess("open", ["-n", "-g", "-b", HELPER_BUNDLE_ID, "--args", "serve", "--socket", HELPER_SOCKET_PATH], COMMAND_TIMEOUT_MS, signal);
-}
-
-async function daemonCommand<T>(cmd: string, args: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
-	return await new Promise<T>((resolve, reject) => {
-		const id = `req_${++runtimeState.requestSequence}`;
-		const socket = net.createConnection(HELPER_SOCKET_PATH);
-		let buffer = "";
-		const timer = setTimeout(() => { socket.destroy(); reject(new HelperTransportError(`Daemon command '${cmd}' timed out after ${timeoutMs}ms.`)); }, timeoutMs);
-		const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); };
-		const onAbort = () => { socket.destroy(); cleanup(); reject(new Error("Operation aborted.")); };
-		signal?.addEventListener("abort", onAbort, { once: true });
-		socket.setEncoding("utf8");
-		socket.on("connect", () => socket.write(`${JSON.stringify({ id, cmd, ...args })}\n`));
-		socket.on("data", (chunk) => {
-			buffer += chunk;
-			const newline = buffer.indexOf("\n");
-			if (newline < 0) return;
-			cleanup();
-			socket.end();
-			try {
-				const parsed = JSON.parse(buffer.slice(0, newline));
-				if (parsed.ok === true) resolve(parsed.result as T);
-				else reject(new HelperCommandError(parsed?.error?.message ?? `Daemon command '${cmd}' failed.`, parsed?.error?.code));
-			} catch (error) {
-				reject(error);
-			}
-		});
-		socket.on("error", (error) => { cleanup(); reject(new HelperTransportError(error.message)); });
-	});
-}
-
-async function ensureDaemon(signal?: AbortSignal): Promise<boolean> {
-	if (runtimeState.daemonAvailable) return true;
-	try {
-		await daemonCommand("diagnostics", {}, 1_000, signal);
-		runtimeState.daemonAvailable = true;
-		return true;
-	} catch {}
-	await launchHelperDaemon(signal).catch(() => undefined);
-	for (let index = 0; index < 30; index += 1) {
-		try {
-			await daemonCommand("diagnostics", {}, 1_000, signal);
-			runtimeState.daemonAvailable = true;
-			return true;
-		} catch {
-			await sleep(100, signal);
-		}
-	}
-	return false;
-}
-
-async function bridgeCommand<T>(
-	cmd: string,
-	args: Record<string, unknown> = {},
-	options?: { timeoutMs?: number; signal?: AbortSignal },
-): Promise<T> {
-	const timeoutMs = options?.timeoutMs ?? COMMAND_TIMEOUT_MS;
-	if (!(await ensureDaemon(options?.signal))) {
-		throw new HelperTransportError(`pi-computer-use helper app daemon is unavailable at ${HELPER_APP_PATH}.`);
-	}
-	try {
-		return await daemonCommand<T>(cmd, args, timeoutMs, options?.signal);
-	} catch (error) {
-		runtimeState.daemonAvailable = false;
-		throw normalizeError(error);
-	}
-}
-
-
-async function checkPermissions(signal?: AbortSignal): Promise<PermissionStatus> {
-	const result = await bridgeCommand<any>("checkPermissions", {}, { signal });
-	const rawSource = result?.source;
-	return {
-		accessibility: toBoolean(result?.accessibility),
-		// Authoritative: the helper's live ScreenCaptureKit probe (falls back
-		// to the plain boolean when talking to a protocol-1 helper).
-		screenRecording: toBoolean(result?.screenRecordingCapturable ?? result?.screenRecording),
-		screenRecordingPreflight: toBoolean(result?.screenRecordingPreflight ?? result?.screenRecording),
-		source: rawSource && typeof rawSource === "object"
-			? {
-				attribution: rawSource.attribution === "helper-app" ? "helper-app" : "caller",
-				pid: Math.trunc(toFiniteNumber(rawSource.pid, 0)) || undefined,
-				parentPid: Math.trunc(toFiniteNumber(rawSource.parentPid, 0)) || undefined,
-				executablePath: toOptionalString(rawSource.executablePath),
-				parentPath: toOptionalString(rawSource.parentPath),
-				parentBundleId: toOptionalString(rawSource.parentBundleId),
-				macOS: toOptionalString(rawSource.macOS),
-			}
-			: undefined,
-	};
-}
-
-async function registerPermissions(signal?: AbortSignal): Promise<void> {
-	await bridgeCommand("registerPermissions", {}, { signal, timeoutMs: 15_000 });
-}
-
-/**
- * Stop the helper and bring up a fresh process. TCC answers are cached per
- * process; only a new helper re-queries tccd after the user grants.
- */
-async function restartHelper(signal?: AbortSignal): Promise<void> {
-	await bridgeCommand("shutdown", {}, { signal, timeoutMs: 2_000 }).catch(() => undefined);
-	runtimeState.daemonAvailable = false;
-	await sleep(400, signal);
-	if (!(await ensureDaemon(signal))) {
-		throw new Error(`pi-computer-use helper did not come back after restart. Helper app: ${HELPER_APP_PATH}`);
-	}
-}
-
-async function helperDiagnostics(signal?: AbortSignal): Promise<HelperDiagnostics> {
-	const result = await bridgeCommand<any>("diagnostics", {}, { signal });
-	return {
-		protocolVersion: Math.trunc(toFiniteNumber(result?.protocolVersion, 0)),
-		pid: Math.trunc(toFiniteNumber(result?.pid, 0)),
-		parentPid: Math.trunc(toFiniteNumber(result?.parentPid, 0)) || undefined,
-		parentAppName: toOptionalString(result?.parentAppName),
-		parentBundleId: toOptionalString(result?.parentBundleId),
-		parentPath: toOptionalString(result?.parentPath),
-		executablePath: toOptionalString(result?.executablePath),
-		macOS: toOptionalString(result?.macOS),
-		arch: toOptionalString(result?.arch),
-		accessibility: toBoolean(result?.accessibility),
-		screenRecording: toBoolean(result?.screenRecording),
-	};
-}
-
-async function ensureHelperProtocol(signal?: AbortSignal): Promise<void> {
-	const diagnostics = await helperDiagnostics(signal);
-	runtimeState.helperDiagnostics = diagnostics;
-	if (diagnostics.protocolVersion !== HELPER_PROTOCOL_VERSION) {
-		runtimeState.daemonAvailable = false;
-		throw new Error(`pi-computer-use helper protocol mismatch: expected ${HELPER_PROTOCOL_VERSION}, got ${diagnostics.protocolVersion}. Restart Pi so the updated helper can be loaded.`);
-	}
-}
-
 async function ensureReady(ctx: ExtensionContext, signal?: AbortSignal): Promise<void> {
 	loadComputerUseConfig(ctx.cwd);
 
-	if (process.platform !== "darwin") {
-		throw new Error(NON_MACOS_ERROR);
-	}
-
 	throwIfAborted(signal);
-	await ensureHelperInstalled(signal);
-	if (!(await ensureDaemon(signal))) {
-		throw new Error(`pi-computer-use helper app daemon did not start. Helper app: ${HELPER_APP_PATH}`);
-	}
-	await ensureHelperProtocol(signal);
-
-	const now = Date.now();
-	const canUseCachedPermissions =
-		runtimeState.permissionStatus &&
-		runtimeState.permissionStatus.accessibility &&
-		runtimeState.permissionStatus.screenRecording &&
-		now - runtimeState.lastPermissionCheckAt < 2_000;
-	if (canUseCachedPermissions) {
-		return;
-	}
-
-	let status = await checkPermissions(signal);
-	runtimeState.permissionStatus = status;
-	runtimeState.lastPermissionCheckAt = now;
-
-	if (!status.accessibility || !status.screenRecording) {
-		// Attribution "caller" means the helper is not running as the
-		// canonical installed app — grants would attach to the wrong
-		// identity. Surface it instead of walking the user through granting
-		// the wrong thing.
-		const attributionHint = status.source?.attribution === "caller"
-			? `Warning: the helper is not running as the installed pi-computer-use.app (executable: ${status.source?.executablePath ?? "unknown"}). Grants made now would attach to the launching app instead. Restart Pi so the canonical helper is used.`
-			: undefined;
-		status = await ensurePermissions(
-			ctx,
-			{
-				checkPermissions: (permissionSignal) => checkPermissions(permissionSignal ?? signal),
-				registerPermissions: (permissionSignal) => registerPermissions(permissionSignal ?? signal),
-				openPermissionPane: async (kind, permissionSignal) => {
-					await bridgeCommand("openPermissionPane", { kind }, { signal: permissionSignal ?? signal });
-				},
-				restartHelper: (permissionSignal) => restartHelper(permissionSignal ?? signal),
-				permissionHint: attributionHint,
-			},
-			HELPER_APP_PATH,
-			signal,
-		);
-	}
-
-	runtimeState.permissionStatus = status;
-	runtimeState.lastPermissionCheckAt = Date.now();
+	const ready = await currentPlatformBackend.ensureReady(
+		ctx,
+		{
+			permissionStatus: runtimeState.permissionStatus,
+			lastPermissionCheckAt: runtimeState.lastPermissionCheckAt,
+			helperDiagnostics: runtimeState.helperDiagnostics,
+		},
+		signal,
+	);
+	runtimeState.permissionStatus = ready.permissionStatus;
+	runtimeState.lastPermissionCheckAt = ready.lastPermissionCheckAt;
+	runtimeState.helperDiagnostics = ready.helperDiagnostics;
 }
 
 export async function ensureComputerUseSetup(ctx: ExtensionContext, signal?: AbortSignal): Promise<void> {
 	await ensureReady(ctx, signal);
 }
 
-function parseApps(result: unknown): HelperApp[] {
-	const array = Array.isArray(result) ? result : (result as any)?.apps;
-	if (!Array.isArray(array)) return [];
-
-	return array
-		.map((raw) => {
-			const pid = Math.trunc(toFiniteNumber((raw as any)?.pid, NaN));
-			if (!Number.isFinite(pid) || pid <= 0) return undefined;
-			const appName = toOptionalString((raw as any)?.appName) ?? "Unknown App";
-			return {
-				appName,
-				bundleId: toOptionalString((raw as any)?.bundleId),
-				pid,
-				isFrontmost: toBoolean((raw as any)?.isFrontmost),
-			} as HelperApp;
-		})
-		.filter((item): item is HelperApp => Boolean(item));
-}
-
-function parseFramePoints(raw: unknown): FramePoints {
-	const frame = (raw as any)?.framePoints ?? {};
-	return {
-		x: toFiniteNumber(frame.x, 0),
-		y: toFiniteNumber(frame.y, 0),
-		w: Math.max(1, toFiniteNumber(frame.w, 1)),
-		h: Math.max(1, toFiniteNumber(frame.h, 1)),
-	};
-}
-
-function parseWindows(result: unknown): HelperWindow[] {
-	const array = Array.isArray(result) ? result : (result as any)?.windows;
-	if (!Array.isArray(array)) return [];
-
-	return array.map((raw) => {
-		const pairing = (raw as any)?.pairing;
-		const confidence = pairing?.confidence === "exact" || pairing?.confidence === "high" || pairing?.confidence === "low" ? pairing.confidence : "low";
-		return {
-			windowId: Number.isFinite((raw as any)?.windowId) ? Math.trunc((raw as any).windowId) : undefined,
-			windowRef: toOptionalString((raw as any)?.windowRef),
-			title: toOptionalString((raw as any)?.title) ?? "",
-			role: toOptionalString((raw as any)?.role),
-			subrole: toOptionalString((raw as any)?.subrole),
-			pairing: { confidence, score: toFiniteNumber(pairing?.score, Number.NEGATIVE_INFINITY) },
-			framePoints: parseFramePoints(raw),
-			scaleFactor: Math.max(1, toFiniteNumber((raw as any)?.scaleFactor, 1)),
-			isMinimized: toBoolean((raw as any)?.isMinimized),
-			isOnscreen: toBoolean((raw as any)?.isOnscreen),
-			isMain: toBoolean((raw as any)?.isMain),
-			isFocused: toBoolean((raw as any)?.isFocused),
-			isModal: toBoolean((raw as any)?.isModal),
-			sheetCount: Math.max(0, Math.trunc(toFiniteNumber((raw as any)?.sheetCount, 0))),
-		};
-	});
-}
-
 async function listApps(signal?: AbortSignal): Promise<HelperApp[]> {
-	const result = await bridgeCommand<unknown>("listApps", {}, { signal });
-	return parseApps(result);
+	return await currentPlatformBackend.listApps(signal);
 }
 
 async function listWindows(pid: number, signal?: AbortSignal): Promise<HelperWindow[]> {
-	const result = await bridgeCommand<unknown>("listWindows", { pid }, { signal });
-	return parseWindows(result);
+	return await currentPlatformBackend.listWindows(pid, signal);
 }
 
 function appMatchesWindowQuery(app: HelperApp, query: ListWindowsParams): boolean {
@@ -1310,27 +671,11 @@ function formatWindowLine(window: ListWindowsDetails["windows"][number]): string
 }
 
 async function getFrontmost(signal?: AbortSignal): Promise<FrontmostResult> {
-	const result = await bridgeCommand<any>("getFrontmost", {}, { signal });
-	const pid = Math.trunc(toFiniteNumber(result?.pid, NaN));
-	if (!Number.isFinite(pid) || pid <= 0) {
-		throw new Error("No frontmost app was available for screenshot targeting.");
-	}
-
-	return {
-		appName: toOptionalString(result?.appName) ?? "Unknown App",
-		bundleId: toOptionalString(result?.bundleId),
-		pid,
-		windowTitle: toOptionalString(result?.windowTitle),
-		windowId: Number.isFinite(result?.windowId) ? Math.trunc(result.windowId) : undefined,
-	};
+	return await currentPlatformBackend.getFrontmost(signal);
 }
 
 async function focusControlledWindow(target: ResolvedTarget, signal?: AbortSignal): Promise<void> {
-	const result = await bridgeCommand<FocusWindowResult>(
-		"focusWindow",
-		nativeWindowRequest(target),
-		{ signal, timeoutMs: COMMAND_TIMEOUT_MS },
-	);
+	const result = await currentPlatformBackend.focusWindow(nativeWindowRequest(target), signal);
 	if (!toBoolean(result?.focused)) {
 		throw new Error(
 			`Unable to focus controlled window '${target.windowTitle}' before input${result?.reason ? `: ${result.reason}` : "."}`,
@@ -1338,16 +683,8 @@ async function focusControlledWindow(target: ResolvedTarget, signal?: AbortSigna
 	}
 }
 
-function isBrowserApp(appName: string, bundleId?: string): boolean {
-	return BROWSER_BUNDLE_IDS.has(bundleId ?? "") || BROWSER_APP_NAMES.has(normalizeText(appName));
-}
-
-function isChromeFamilyApp(appName: string, bundleId?: string): boolean {
-	return CHROME_FAMILY_BUNDLE_IDS.has(bundleId ?? "") || CHROME_FAMILY_APP_NAMES.has(normalizeText(appName));
-}
-
 function assertBrowserUseAllowed(target: { appName: string; bundleId?: string }): void {
-	if (!isBrowserUseEnabled() && isBrowserApp(target.appName, target.bundleId)) {
+	if (!isBrowserUseEnabled() && currentPlatformBackend.isBrowserApp(target.appName, target.bundleId)) {
 		throw new Error(
 			`Browser use is disabled by pi-computer-use config, so '${target.appName}' cannot be controlled. Enable browser_use in ~/.pi/agent/extensions/pi-computer-use.json or .pi/computer-use.json to allow browser windows.`,
 		);
@@ -1417,35 +754,6 @@ function storeWindowRefForAppWindow(app: HelperApp, window: HelperWindow): Windo
 	});
 }
 
-function escapeAppleScriptString(value: string): string {
-	return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
-}
-
-async function runAppleScript(lines: string[], signal?: AbortSignal): Promise<void> {
-	const args = lines.flatMap((line) => ["-e", line]);
-	try {
-		await runProcess("osascript", args, BROWSER_WINDOW_OPEN_TIMEOUT_MS, signal);
-	} catch (error) {
-		throw appendBrowserJavaScriptAppleEventsHint(normalizeError(error));
-	}
-}
-
-function browserOpenLocationAppleScript(target: ResolvedTarget, url: string): string[] | undefined {
-	if (!isBrowserApp(target.appName, target.bundleId)) return undefined;
-	const appTarget = target.bundleId
-		? `application id "${escapeAppleScriptString(target.bundleId)}"`
-		: `application "${escapeAppleScriptString(target.appName)}"`;
-	const escapedUrl = escapeAppleScriptString(url);
-	const normalizedName = normalizeText(target.appName);
-	if (target.bundleId === "com.apple.Safari" || normalizedName === "safari") {
-		return [`tell ${appTarget} to set URL of front document to "${escapedUrl}"`];
-	}
-	if (isChromeFamilyApp(target.appName, target.bundleId)) {
-		return [`tell ${appTarget} to set URL of active tab of front window to "${escapedUrl}"`];
-	}
-	return undefined;
-}
-
 async function openBrowserLocationFromPendingAddress(keys: string[], target: ResolvedTarget, signal?: AbortSignal): Promise<boolean> {
 	const isEnter = keys.length === 1 && ["enter", "return"].includes(keys[0]?.trim().toLowerCase());
 	const pending = runtimeState.pendingBrowserAddress;
@@ -1458,11 +766,9 @@ async function openBrowserLocationFromPendingAddress(keys: string[], target: Res
 		runtimeState.pendingBrowserAddress = undefined;
 		return false;
 	}
-	const script = browserOpenLocationAppleScript(target, pending.text);
-	if (!script) return false;
+	if (!currentPlatformBackend.isBrowserApp(target.appName, target.bundleId)) return false;
 	runtimeState.pendingBrowserAddress = undefined;
-	await runAppleScript(script, signal);
-	return true;
+	return await currentPlatformBackend.openBrowserLocation(target, pending.text, signal);
 }
 
 function choosePreferredWindow(windows: HelperWindow[], appName: string): HelperWindow {
@@ -1744,7 +1050,7 @@ async function resolveFrontmostTarget(signal?: AbortSignal): Promise<ResolvedTar
 		throw new Error("No frontmost controllable window was found. Open an app window and call observe again.");
 	}
 
-	if (isBrowserApp(app.appName, app.bundleId)) {
+	if (currentPlatformBackend.isBrowserApp(app.appName, app.bundleId)) {
 		assertBrowserUseAllowed(app);
 	}
 
@@ -1801,7 +1107,7 @@ async function resolveTargetForObserve(selection: ObserveTargetParams, signal?: 
 		let window: HelperWindow;
 		if (windowTitleQuery) {
 			window = chooseWindowByTitle(windows, windowTitleQuery, app.appName);
-		} else if (isBrowserApp(app.appName, app.bundleId)) {
+		} else if (currentPlatformBackend.isBrowserApp(app.appName, app.bundleId)) {
 			const current = runtimeState.currentTarget;
 			const currentBrowserWindow =
 				current && current.pid === app.pid ? windows.find((candidate) => candidate.windowId === current.windowId) : undefined;
@@ -1886,12 +1192,7 @@ function captureForLook(look: LookResponse): CurrentCapture {
 }
 
 async function performLook(windowId: number, options: { readText: "auto" | "always" | "never"; scopeRef?: string; maxDimension?: number }, signal?: AbortSignal): Promise<LookResponse> {
-	return parseLookResponse(await bridgeCommand("look", {
-		windowId,
-		maxDimension: options.maxDimension,
-		readText: options.readText,
-		scopeRef: options.scopeRef,
-	}, { timeoutMs: SCREENSHOT_TIMEOUT_MS + 8_000, signal }));
+	return await currentPlatformBackend.look(windowId, options, signal);
 }
 
 function noteWindowForTarget(target: ResolvedTarget | CurrentTarget, look?: LookResponse) {
@@ -2001,7 +1302,7 @@ async function buildToolResult(
 	// Console piggyback: when a CDP connection is active for this browser
 	// window, surface console output collected since the last tool result.
 	let consoleText = "";
-	if (isChromeFamilyApp(result.target.appName, result.target.bundleId)) {
+	if (currentPlatformBackend.isChromeFamilyApp(result.target.appName, result.target.bundleId)) {
 		const tab = await cdpTabForWindow(result.target.windowTitle, result.target.framePoints);
 		const entries = tab?.drainConsole() ?? [];
 		if (entries.length > 0) {
@@ -2092,18 +1393,14 @@ async function helperAct(
 	signal?: AbortSignal,
 ): Promise<ExecutionTrace> {
 	const look = currentLookOrThrow();
-	const result = await bridgeCommand<HelperActResult>(
-		"act",
-		{
-			lookId: look.lookId,
-			pid: target.pid,
-			target: actTarget,
-			action,
-			policy: currentDeliveryPolicy(),
-			params: { ...params, delivery: nativeInputDelivery() },
-		},
-		{ signal, timeoutMs: Math.max(COMMAND_TIMEOUT_MS, typeof params.text === "string" ? params.text.length * 25 + 4_000 : COMMAND_TIMEOUT_MS) },
-	);
+	const result = await currentPlatformBackend.act({
+		lookId: look.lookId,
+		pid: target.pid,
+		target: actTarget,
+		action,
+		policy: currentDeliveryPolicy(),
+		params: { ...params, delivery: nativeInputDelivery() },
+	}, { signal, timeoutMs: Math.max(COMMAND_TIMEOUT_MS, typeof params.text === "string" ? params.text.length * 25 + 4_000 : COMMAND_TIMEOUT_MS) });
 	if (!result || !["worked", "didnt", "unknown"].includes(result.outcome)) {
 		throw new Error("Helper act returned an invalid result without an outcome.");
 	}
@@ -2182,13 +1479,13 @@ async function performListApps(signal?: AbortSignal): Promise<AgentToolResult<Li
 			bundleId: app.bundleId,
 			pid: app.pid,
 			isFrontmost: app.isFrontmost === true,
-			browserUseAllowed: config.browser_use || !isBrowserApp(app.appName, app.bundleId),
+			browserUseAllowed: config.browser_use || !currentPlatformBackend.isBrowserApp(app.appName, app.bundleId),
 		})),
 		config,
 		helper: runtimeState.helperDiagnostics,
 	};
 	const lines = details.apps.map(formatAppLine);
-	const helperLine = details.helper ? `Helper protocol ${details.helper.protocolVersion}, pid ${details.helper.pid}, macOS ${details.helper.macOS ?? "unknown"}.\n` : "";
+	const helperLine = details.helper ? `Helper protocol ${details.helper.protocolVersion}, pid ${details.helper.pid}, OS ${details.helper.os ?? "unknown"}.\n` : "";
 	const text = lines.length
 		? `${helperLine}Found ${lines.length} running app${lines.length === 1 ? "" : "s"}. Use list_windows with app, bundleId, or pid to inspect target windows.\n${lines.join("\n")}`
 		: `${helperLine}No running apps were available to pi-computer-use.`;
@@ -2221,7 +1518,7 @@ async function collectWindowDetails(apps: HelperApp[], config: ReturnType<typeof
 				role: window.role,
 				subrole: window.subrole,
 				pairing: window.pairing,
-				browserUseAllowed: config.browser_use || !isBrowserApp(app.appName, app.bundleId),
+				browserUseAllowed: config.browser_use || !currentPlatformBackend.isBrowserApp(app.appName, app.bundleId),
 				score: scoreWindow(window),
 			});
 		}
@@ -2373,7 +1670,7 @@ async function performReadText(params: ReadTextParams, signal?: AbortSignal): Pr
 	validateStateId(params.stateId);
 	if (!ref) throw new Error("read_text requires ref for desktop contexts. Call observe/inspect_ui and use a text-bearing outline ref.");
 	const node = outlineNodeByRef(ref);
-	const raw = await bridgeCommand("axReadText", {
+	const raw = await currentPlatformBackend.readText({
 		elementRef: wireRefForNode(node),
 		offset: Math.max(0, Math.trunc(toFiniteNumber(params.offset, 0))),
 		limit: Math.max(1, Math.min(100_000, Math.trunc(toFiniteNumber(params.limit, 4_000)))),
@@ -2427,7 +1724,7 @@ async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Prom
 	await selectWindowIfProvided(params.window ?? desktopWindowRef, signal);
 	let target = await resolveCurrentTarget(signal);
 	target = await ensureTargetWindowId(target, signal);
-	const raw = await bridgeCommand("axWaitFor", {
+	const raw = await currentPlatformBackend.waitFor({
 		...nativeWindowRequest(target),
 		text,
 		role,
@@ -2460,7 +1757,7 @@ async function performSnapshot(params: SnapshotParams, signal?: AbortSignal): Pr
 	const browser = await cdpSnapshotForContext(contextId).catch(() => undefined);
 	if (browser) {
 		const targetText = browser.targets.length
-			? `\n\nTargets:\n${browser.targets.map((target) => `${target.ref} ${target.role} \"${textPreview(target.name, AX_TARGET_TEXT_PREVIEW_CHARS)}\" [${target.actions.join(",")}]`).join("\n")}`
+			? `\n\nTargets:\n${browser.targets.map((target) => `${target.ref} ${target.role} \"${textPreview(target.name, OUTLINE_TARGET_TEXT_PREVIEW_CHARS)}\" [${target.actions.join(",")}]`).join("\n")}`
 			: "";
 		const browserTextPreview = textPreview(browser.text, BROWSER_SNAPSHOT_TEXT_PREVIEW_CHARS);
 		const pageText = browserTextPreview ? `\n\nPage text preview (${browserTextPreview.length}/${browser.text.length} chars; use read_text for more):\n${browserTextPreview}` : "";
@@ -2556,7 +1853,7 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 	const matches = searchOutline(outline, text, role, action, limit);
 	const detailMatches = matches.map((match) => ({ ...match, node: serializeOutlineNode(match.node) }));
 	const details: OutlineToolDetails = { tool: "search_ui", stateId: runtimeState.currentCapture?.stateId, lookId: outline.lookId, outline: serializeOutline(outline), matches: detailMatches, note: runtimeState.currentNote };
-	const lines = matches.map((match) => `${match.ref} ${match.role || "AXUnknown"} ${JSON.stringify(match.label || "(unlabeled)")}\n  path: ${match.path}`);
+	const lines = matches.map((match) => `${match.ref} ${match.role || "Unknown"} ${JSON.stringify(match.label || "(unlabeled)")}\n  path: ${match.path}`);
 	const noteHeader = renderNote(runtimeState.currentNote);
 	const noteText = noteHeader ? `${noteHeader}\n\n` : "";
 	return { content: [{ type: "text", text: `${noteText}Found ${matches.length} outline match${matches.length === 1 ? "" : "es"}.\n${lines.join("\n")}` }], details };
@@ -2845,7 +2142,7 @@ async function performNavigateBrowser(params: NavigateBrowserParams, signal?: Ab
 	await selectWindowIfProvided(params.window, signal);
 	const target = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
 	assertBrowserUseAllowed(target);
-	if (!isBrowserApp(target.appName, target.bundleId)) {
+	if (!currentPlatformBackend.isBrowserApp(target.appName, target.bundleId)) {
 		throw new Error(`navigate_browser requires a browser window, but the target is '${target.appName}'.`);
 	}
 	const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(url)?.[1];
@@ -2857,10 +2154,10 @@ async function performNavigateBrowser(params: NavigateBrowserParams, signal?: Ab
 	if (scheme && (looksLikeUrl || dangerousScheme) && !/^https?$/i.test(scheme)) {
 		throw new Error(`navigate_browser only supports http(s) URLs or browser-search strings; '${scheme}:' URLs are not allowed.`);
 	}
-	// Prefer CDP when available: event-driven page-load wait, no AppleScript,
-	// and no focus change. Bare search strings keep the AppleScript path,
-	// which has address-bar semantics.
-	const cdpTab = /^https?:/i.test(url) && isChromeFamilyApp(target.appName, target.bundleId)
+	// Prefer CDP when available: event-driven page-load wait and no focus
+	// change. Bare search strings keep the platform browser-open path, which
+	// has address-bar semantics.
+	const cdpTab = /^https?:/i.test(url) && currentPlatformBackend.isChromeFamilyApp(target.appName, target.bundleId)
 		? await cdpTabForWindow(target.windowTitle, target.framePoints)
 		: undefined;
 	if (cdpTab) {
@@ -2877,13 +2174,13 @@ async function performNavigateBrowser(params: NavigateBrowserParams, signal?: Ab
 		});
 	}
 
-	const script = browserOpenLocationAppleScript(target, url);
-	if (!script) {
+	if (!currentPlatformBackend.isBrowserApp(target.appName, target.bundleId)) {
 		throw new Error(`navigate_browser does not yet support direct URL navigation for '${target.appName}'. Use keypress Command+L, type_text, Enter instead.`);
 	}
 	return await withWindowWriteLock(target, async () => {
 		await focusControlledWindow(target, signal);
-		await runAppleScript(script, signal);
+		const opened = await currentPlatformBackend.openBrowserLocation(target, url, signal);
+		if (!opened) throw new Error(`navigate_browser does not yet support direct URL navigation for '${target.appName}'. Use keypress Command+L, type_text, Enter instead.`);
 		await sleep(ACTION_SETTLE_MS, signal);
 		const captureResult = await captureCurrentTarget(signal);
 		return await buildToolResult(
@@ -2975,7 +2272,7 @@ export function reconstructStateFromBranch(ctx: ExtensionContext): void {
 		if ((entry as any)?.type !== "message") continue;
 		const message = (entry as any).message;
 		if (!message || message.role !== "toolResult") continue;
-		if (!TOOL_NAMES.has(message.toolName)) continue;
+		if (!AGENT_TOOL_NAMES.has(message.toolName)) continue;
 
 		const rawDetails = message.details as any;
 		if (rawDetails?.tool === "list_windows" && Array.isArray(rawDetails.windows)) {
@@ -2989,7 +2286,12 @@ export function reconstructStateFromBranch(ctx: ExtensionContext): void {
 					windowTitle: typeof window.windowTitle === "string" ? window.windowTitle : "(untitled)",
 					windowId: Number.isFinite(window.windowId) ? Math.trunc(window.windowId) : undefined,
 					nativeWindowRef: typeof window.nativeWindowRef === "string" ? window.nativeWindowRef : undefined,
-					framePoints: parseFramePoints({ framePoints: window.framePoints }),
+					framePoints: {
+						x: toFiniteNumber(window.framePoints?.x, 0),
+						y: toFiniteNumber(window.framePoints?.y, 0),
+						w: Math.max(1, toFiniteNumber(window.framePoints?.w, 1)),
+						h: Math.max(1, toFiniteNumber(window.framePoints?.h, 1)),
+					},
 					scaleFactor: Math.max(1, toFiniteNumber(window.scaleFactor, 1)),
 					isMinimized: toBoolean(window.isMinimized),
 					isOnscreen: toBoolean(window.isOnscreen),

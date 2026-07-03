@@ -1,0 +1,151 @@
+export type WindowSelector = string | number;
+export type ImageMode = "auto" | "always" | "never";
+export type MouseButtonName = "left" | "right" | "middle";
+
+export interface ObserveTargetParams {
+	app?: string;
+	windowTitle?: string;
+	window?: WindowSelector;
+	image?: ImageMode;
+}
+
+export interface ListWindowsParams {
+	app?: string;
+	bundleId?: string;
+	pid?: number;
+}
+
+export interface WindowTargetParams {
+	contextId?: string;
+	window?: WindowSelector;
+	stateId?: string;
+	image?: ImageMode;
+	responseMode?: "state" | "confirmation";
+}
+
+export interface TypeTextParams extends WindowTargetParams {
+	text: string;
+}
+
+export interface SetTextParams extends WindowTargetParams {
+	text: string;
+	ref?: string;
+	method?: "ax" | "keyboard";
+}
+
+export interface KeypressParams extends WindowTargetParams {
+	keys: string[];
+}
+
+export interface ScrollParams extends WindowTargetParams {
+	x?: number;
+	y?: number;
+	ref?: string;
+	scrollX?: number;
+	scrollY?: number;
+}
+
+export interface MoveMouseParams extends WindowTargetParams {
+	x: number;
+	y: number;
+}
+
+export interface DragParams extends WindowTargetParams {
+	path?: Array<{ x: number; y: number } | [number, number]>;
+	ref?: string;
+}
+
+export interface NavigateBrowserParams extends WindowTargetParams {
+	url: string;
+}
+
+export interface LaunchBrowserContextParams {
+	browser?: "helium" | "chrome";
+	url?: string;
+	port?: number;
+}
+
+export interface EvaluateBrowserParams {
+	contextId: string;
+	expression: string;
+}
+
+export interface WaitParams extends WindowTargetParams {
+	ms?: number;
+}
+
+export interface ObserveParams extends ObserveTargetParams {
+	mode?: "semantic" | "visual" | "fused";
+}
+
+export interface SearchUiParams extends WindowTargetParams {
+	text?: string;
+	role?: string;
+	action?: string;
+	source?: string;
+	limit?: number;
+}
+
+export interface ExpandUiParams extends WindowTargetParams {
+	ref: string;
+	depth?: number;
+}
+
+export interface InspectUiParams extends WindowTargetParams {
+	ref: string;
+	includeRaw?: boolean;
+}
+
+export interface ActParams extends WindowTargetParams {
+	action: "press" | "click" | "doubleClick" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse" | "wait";
+	ref?: string;
+	x?: number;
+	y?: number;
+	text?: string;
+	keys?: string[];
+	scrollX?: number;
+	scrollY?: number;
+	path?: DragParams["path"];
+	button?: MouseButtonName;
+	clickCount?: number;
+	method?: "ax" | "keyboard";
+	ms?: number;
+}
+
+export interface SnapshotParams {
+	contextId: string;
+	scopeRef?: string;
+	maxNodes?: number;
+	maxDepth?: number;
+	image?: ImageMode;
+}
+
+export interface ReadTextParams extends WindowTargetParams {
+	ref?: string;
+	offset?: number;
+	limit?: number;
+}
+
+export interface WaitForParams extends WindowTargetParams {
+	text?: string;
+	role?: string;
+	gone?: boolean;
+	timeoutMs?: number;
+}
+
+export const AGENT_TOOL_NAMES = new Set([
+	"list_apps",
+	"list_windows",
+	"list_contexts",
+	"snapshot",
+	"read_text",
+	"wait_for",
+	"observe",
+	"search_ui",
+	"expand_ui",
+	"inspect_ui",
+	"act",
+	"navigate_browser",
+	"evaluate_browser",
+	"launch_browser_context",
+]);
