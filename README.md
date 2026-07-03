@@ -32,7 +32,7 @@ Computer use is most helpful when the only available interface is the app on scr
 ## Install
 
 ```bash
-pi install git:github.com/injaneity/pi-computer-use@main
+pi install git:github.com/injaneity/pi-computer-use@v0.4.0
 ```
 
 Start Pi and grant permissions to:
