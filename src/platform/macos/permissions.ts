@@ -48,10 +48,18 @@ async function checkPermissions(signal?: AbortSignal): Promise<PermissionStatus>
 	const rawSource = result?.source;
 	return {
 		accessibility: toBoolean(result?.accessibility),
+		// Authoritative: the helper's live ScreenCaptureKit probe. Fall back to
+		// the plain boolean for old protocol-1 helpers.
 		screenRecording: toBoolean(result?.screenRecordingCapturable ?? result?.screenRecording),
+		// Keep the preflight value separate: disagreement means stale per-process
+		// TCC cache or a grant row belonging to another app identity.
 		screenRecordingPreflight: toBoolean(result?.screenRecordingPreflight ?? result?.screenRecording),
 		source: rawSource && typeof rawSource === "object"
 			? {
+				// macOS attributes Accessibility / Screen Recording grants to the
+				// responsible process at the top of the launch chain. "helper-app"
+				// is the canonical installed app via LaunchServices; "caller" means
+				// grants would attach to the launching app instead.
 				attribution: rawSource.attribution === "helper-app" ? "helper-app" : "caller",
 				pid: Math.trunc(toFiniteNumber(rawSource.pid, 0)) || undefined,
 				parentPid: Math.trunc(toFiniteNumber(rawSource.parentPid, 0)) || undefined,
@@ -65,6 +73,9 @@ async function checkPermissions(signal?: AbortSignal): Promise<PermissionStatus>
 }
 
 async function registerPermissions(signal?: AbortSignal): Promise<void> {
+	// Raises the Accessibility prompt and performs a real ScreenCaptureKit
+	// capture attempt so pi-computer-use.app is pre-listed in both Settings
+	// panes; the user only flips toggles, no "+" path picking.
 	await macosHelper.command("registerPermissions", {}, { signal, timeoutMs: 15_000 });
 }
 
@@ -104,7 +115,6 @@ export async function ensureMacosReady(
 				kinds: macosPermissionKinds,
 				copy: {
 					nonInteractiveError: (helperPath) => `pi-computer-use setup requires an interactive session. Start pi in interactive mode. ${GRANT_INSTRUCTIONS}\nHelper path: ${helperPath}`,
-					statusSummary: permissionStatusSummary,
 					prompt: permissionPrompt,
 					incompleteError: (helperPath) => `pi-computer-use setup is incomplete. ${GRANT_INSTRUCTIONS} Helper path: ${helperPath}`,
 					readyMessage: "pi-computer-use is ready.",

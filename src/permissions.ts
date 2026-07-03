@@ -1,5 +1,8 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
+// Which process identity the permission answers reflect. Platforms may
+// attribute grants to a responsible parent process rather than the helper
+// executable itself.
 export type PermissionAttribution = "helper-app" | "caller";
 export type PermissionKind = "accessibility" | "screenRecording";
 
@@ -27,7 +30,6 @@ export interface PermissionKindCopy {
 
 export interface PermissionFlowCopy {
 	nonInteractiveError(helperPath: string): string;
-	statusSummary(status: PermissionStatus): string;
 	prompt(status: PermissionStatus, helperPath: string, hint?: string): string;
 	incompleteError(helperPath: string): string;
 	readyMessage: string;
@@ -40,6 +42,8 @@ export interface PermissionBridge {
 	checkPermissions(signal?: AbortSignal): Promise<PermissionStatus>;
 	registerPermissions(signal?: AbortSignal): Promise<void>;
 	openPermissionPane(kind: PermissionKind, signal?: AbortSignal): Promise<void>;
+	// Platforms may cache permission answers per process, so restart before
+	// recheck lets a new grant become visible to the helper.
 	restartHelper(signal?: AbortSignal): Promise<void>;
 	permissionHint?: string;
 }
@@ -71,6 +75,8 @@ export async function ensurePermissions(
 
 	if (!ctx.hasUI) throw new Error(bridge.copy.nonInteractiveError(helperPath));
 
+	// Register before prompting so platform settings panes can already list
+	// the helper and the user only has to enable existing entries.
 	await bridge.registerPermissions(signal).catch(() => undefined);
 
 	while (!allGranted(status, bridge.kinds)) {
@@ -89,6 +95,8 @@ export async function ensurePermissions(
 		if (selected) await bridge.openPermissionPane(selected.kind, signal);
 
 		if (choice.startsWith("Recheck")) {
+			// Restart first: permission decisions can be cached by a running
+			// helper process and remain stale after the user grants access.
 			await bridge.restartHelper(signal);
 			status = await bridge.checkPermissions(signal);
 			if (allGranted(status, bridge.kinds)) {
