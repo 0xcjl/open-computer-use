@@ -13,7 +13,7 @@ import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineN
 import { AGENT_TOOL_NAMES, type ActParams, type DragParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type KeypressParams, type LaunchBrowserContextParams, type ListWindowsParams, type MouseButtonName, type MoveMouseParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type ScrollParams, type SearchUiParams, type SetTextParams, type SnapshotParams, type TypeTextParams, type WaitForParams, type WaitParams, type WindowSelector, type WindowTargetParams } from "./contract.ts";
 import { finiteNumber } from "./platform/coerce.ts";
 import { currentPlatformBackend } from "./platform/index.ts";
-import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformActParams, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformWindow as HelperWindow } from "./platform/types.ts";
+import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformActRequest, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformWindow as HelperWindow } from "./platform/types.ts";
 import type { PermissionStatus } from "./permissions.ts";
 export type { ActParams, DragParams, EvaluateBrowserParams, ExpandUiParams, ImageMode, InspectUiParams, KeypressParams, LaunchBrowserContextParams, ListWindowsParams, MouseButtonName, MoveMouseParams, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, ScrollParams, SearchUiParams, SetTextParams, SnapshotParams, TypeTextParams, WaitForParams, WaitParams, WindowSelector, WindowTargetParams } from "./contract.ts";
 
@@ -1323,6 +1323,14 @@ async function buildToolResult(
 
 type HelperActAction = "press" | "click" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse";
 type HelperActTarget = { ref: string } | { x: number; y: number };
+type HelperActInput =
+	| { action: "press" | "click"; params: { button?: MouseButtonName; clickCount?: number } }
+	| { action: "setText"; params: { text: string } }
+	| { action: "typeText"; params: { text: string } }
+	| { action: "keypress"; params: { keys: string[] } }
+	| { action: "scroll"; params: { scrollX: number; scrollY: number } }
+	| { action: "drag"; params: { path: Array<{ x: number; y: number }> } }
+	| { action: "moveMouse"; params: Record<string, never> };
 
 function currentLookOrThrow(): LookResponse {
 	if (!runtimeState.currentLook || !runtimeState.currentCapture) {
@@ -1386,20 +1394,27 @@ function executionTraceFromAct(result: HelperActResult): ExecutionTrace {
 
 async function helperAct(
 	target: ResolvedTarget,
-	action: HelperActAction,
 	actTarget: HelperActTarget,
-	params: PlatformActParams,
+	input: HelperActInput,
 	signal?: AbortSignal,
 ): Promise<ExecutionTrace> {
 	const look = currentLookOrThrow();
-	const result = await currentPlatformBackend.act({
-		lookId: look.lookId,
-		pid: target.pid,
-		target: actTarget,
-		action,
-		policy: currentDeliveryPolicy(),
-		params: { ...params, delivery: nativeInputDelivery() },
-	}, { signal, timeoutMs: Math.max(COMMAND_TIMEOUT_MS, typeof (params as { text?: unknown }).text === "string" ? (params as { text: string }).text.length * 25 + 4_000 : COMMAND_TIMEOUT_MS) });
+	const delivery = nativeInputDelivery();
+	const base = { lookId: look.lookId, pid: target.pid, target: actTarget, policy: currentDeliveryPolicy() };
+	const request: PlatformActRequest = (() => {
+		switch (input.action) {
+			case "press":
+			case "click": return { ...base, action: input.action, params: { ...input.params, delivery } };
+			case "setText": return { ...base, action: input.action, params: { text: input.params.text, delivery } };
+			case "typeText": return { ...base, action: input.action, params: { text: input.params.text, delivery } };
+			case "keypress": return { ...base, action: input.action, params: { keys: input.params.keys, delivery } };
+			case "scroll": return { ...base, action: input.action, params: { scrollX: input.params.scrollX, scrollY: input.params.scrollY, delivery } };
+			case "drag": return { ...base, action: input.action, params: { path: input.params.path, delivery } };
+			case "moveMouse": return { ...base, action: input.action, params: { delivery } };
+		}
+	})();
+	const textTimeout = "text" in input.params ? input.params.text.length * 25 + 4_000 : COMMAND_TIMEOUT_MS;
+	const result = await currentPlatformBackend.act(request, { signal, timeoutMs: Math.max(COMMAND_TIMEOUT_MS, textTimeout) });
 	if (!result || !["worked", "didnt", "unknown"].includes(result.outcome)) {
 		throw new Error("Helper act returned an invalid result without an outcome.");
 	}
@@ -1927,7 +1942,7 @@ async function performAct(params: ActParams, signal?: AbortSignal): Promise<Agen
 
 async function performHelperAct(
 	params: WindowTargetParams & { ref?: string; x?: number; y?: number; button?: MouseButtonName; clickCount?: number },
-	action: HelperActAction,
+	action: "press" | "click",
 	tool: string,
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<ComputerUseDetails | ConfirmationDetails>> {
@@ -1940,9 +1955,12 @@ async function performHelperAct(
 	return await runActionTool(
 		tool,
 		signal,
-		async (target) => await helperAct(target, action, actTarget, {
-			button: normalizeMouseButton(params.button),
-			clickCount: normalizeClickCount(params.clickCount),
+		async (target) => await helperAct(target, actTarget, {
+			action,
+			params: {
+				button: normalizeMouseButton(params.button),
+				clickCount: normalizeClickCount(params.clickCount),
+			},
 		}, signal),
 		(target, returnedState, execution) => `${tool.replace(/_/g, " ")} ${label} in ${target.appName} — ${target.windowTitle}.${actOutcomeText(execution)}${returnedState ? " Returned the latest outline state." : " Call observe if you need updated state."}`,
 		{ responseMode: params.responseMode, targetRef: actTargetPublicRef(params) },
@@ -1962,7 +1980,7 @@ async function performTypeText(params: TypeTextParams, signal?: AbortSignal): Pr
 	return await runActionTool(
 		"type_text",
 		signal,
-		async (target) => await helperAct(target, "typeText", actTarget, { text }, signal),
+		async (target) => await helperAct(target, actTarget, { action: "typeText", params: { text } }, signal),
 		(target, returnedState, execution) => `Inserted text in ${target.appName} — ${target.windowTitle}.${actOutcomeText(execution)}${returnedState ? " Returned the latest outline state." : " Call observe if you need updated state."}`,
 		{ responseMode: params.responseMode },
 	);
@@ -1980,7 +1998,7 @@ async function performSetText(params: SetTextParams, signal?: AbortSignal): Prom
 	return await runActionTool(
 		"set_text",
 		signal,
-		async (target) => await helperAct(target, "setText", actTarget, { text, method: params.method }, signal),
+		async (target) => await helperAct(target, actTarget, { action: "setText", params: { text } }, signal),
 		(target, returnedState, execution) => `Set text value in ${target.appName} — ${target.windowTitle}.${actOutcomeText(execution)}${returnedState ? " Returned the latest outline state." : " Call observe if you need updated state."}`,
 		{ responseMode: params.responseMode, targetRef: actTargetPublicRef(params) },
 	);
@@ -2001,7 +2019,7 @@ async function performKeypress(params: KeypressParams, signal?: AbortSignal): Pr
 	return await runActionTool(
 		"keypress",
 		signal,
-		async (target) => await helperAct(target, "keypress", actTarget, { keys }, signal),
+		async (target) => await helperAct(target, actTarget, { action: "keypress", params: { keys } }, signal),
 		(target, returnedState, execution) => `Pressed ${keys.length} key${keys.length === 1 ? "" : "s"} in ${target.appName} — ${target.windowTitle}.${actOutcomeText(execution)}${returnedState ? " Returned the latest outline state." : " Call observe if you need updated state."}`,
 		{ responseMode: params.responseMode },
 	);
@@ -2022,7 +2040,7 @@ async function performScroll(params: ScrollParams, signal?: AbortSignal): Promis
 	return await runActionTool(
 		"scroll",
 		signal,
-		async (target) => await helperAct(target, "scroll", actTarget, { scrollX, scrollY }, signal),
+		async (target) => await helperAct(target, actTarget, { action: "scroll", params: { scrollX, scrollY } }, signal),
 		(target, returnedState, execution) => {
 			const suffix = returnedState ? " Returned the latest outline state." : " Call observe if you need updated state.";
 			return ref
@@ -2042,7 +2060,7 @@ async function performMoveMouse(params: MoveMouseParams, signal?: AbortSignal): 
 	return await runActionTool(
 		"move_mouse",
 		signal,
-		async (target) => await helperAct(target, "moveMouse", actTarget, {}, signal),
+		async (target) => await helperAct(target, actTarget, { action: "moveMouse", params: {} }, signal),
 		(target, returnedState, execution) =>
 			`Moved mouse in ${target.appName} — ${target.windowTitle}.${actOutcomeText(execution)}${returnedState ? " Returned the latest outline state." : " Call observe if you need updated state."}`,
 		{ responseMode: params.responseMode },
@@ -2059,7 +2077,7 @@ async function performDrag(params: DragParams, signal?: AbortSignal): Promise<Ag
 	return await runActionTool(
 		"drag",
 		signal,
-		async (target) => await helperAct(target, "drag", actTarget, { path }, signal),
+		async (target) => await helperAct(target, actTarget, { action: "drag", params: { path } }, signal),
 		(target, returnedState, execution) => `Dragged in ${target.appName} — ${target.windowTitle}.${actOutcomeText(execution)}${returnedState ? " Returned the latest outline state." : " Call observe if you need updated state."}`,
 		{ responseMode: params.responseMode, targetRef: actTargetPublicRef(params) },
 	);

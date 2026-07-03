@@ -110,25 +110,26 @@ export interface PlatformObserveRequest {
 export type PlatformActAction = "press" | "click" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse";
 export type PlatformActTarget = { ref: string } | { x: number; y: number };
 export type PlatformDeliveryPolicy = "ax_only" | "background" | "default";
-export type PlatformSetTextMethod = "ax" | "keyboard";
+export type PlatformMouseButton = "left" | "right" | "middle";
+export type PlatformActDeliveryParam = { delivery?: NativeInputDelivery };
+export type PlatformPoint = { x: number; y: number };
 
-export type PlatformActParams =
-	| { button?: "left" | "right" | "middle"; clickCount?: number }
-	| { text: string; method?: PlatformSetTextMethod }
-	| { text: string }
-	| { keys: string[] }
-	| { scrollX: number; scrollY: number }
-	| { path: Array<{ x: number; y: number }> }
-	| Record<string, never>;
-
-export interface PlatformActRequest {
+export interface PlatformActRequestBase {
 	lookId: string;
 	pid?: number;
 	target: PlatformActTarget;
-	action: PlatformActAction;
 	policy: PlatformDeliveryPolicy;
-	params: PlatformActParams & { delivery?: NativeInputDelivery };
 }
+
+export type PlatformActRequest = PlatformActRequestBase & (
+	| { action: "press" | "click"; params: { button?: PlatformMouseButton; clickCount?: number } & PlatformActDeliveryParam }
+	| { action: "setText"; params: { text: string } & PlatformActDeliveryParam }
+	| { action: "typeText"; params: { text: string } & PlatformActDeliveryParam }
+	| { action: "keypress"; params: { keys: string[] } & PlatformActDeliveryParam }
+	| { action: "scroll"; params: { scrollX: number; scrollY: number } & PlatformActDeliveryParam }
+	| { action: "drag"; params: { path: PlatformPoint[] } & PlatformActDeliveryParam }
+	| { action: "moveMouse"; params: PlatformActDeliveryParam }
+);
 
 export interface PlatformReadTextRequest {
 	elementRef: string;
