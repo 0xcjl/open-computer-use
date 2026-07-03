@@ -37,14 +37,25 @@ on:
         description: "Version to stamp (e.g. 0.4.0)"
         required: true
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-helper-${{ github.ref_name || inputs.version }}
+  cancel-in-progress: false
+
 env:
   KEYCHAIN_PASSWORD: ci-keychain-password
 
 jobs:
   release-helper:
     runs-on: macos-14
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Resolve version
         id: version
