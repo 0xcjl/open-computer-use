@@ -1,6 +1,8 @@
 import Foundation
 import AppKit
 import ApplicationServices
+import Darwin
+import Vision
 #if PI_COMPUTER_USE_SCREEN_CAPTURE_KIT
 import ScreenCaptureKit
 #endif
@@ -199,6 +201,7 @@ final class InputSuppressionGuard {
 }
 
 final class Bridge {
+	private let protocolVersion = 1
 	private let refStore = AXRefStore()
 	private let inputSuppressionGuard = InputSuppressionGuard()
 	private let browserBundleIds: Set<String> = [
@@ -206,8 +209,13 @@ final class Bridge {
 	]
 	private var enhancedAccessibilityPids = Set<Int32>()
 	private var stdinBuffer = Data()
+	private var output = FileHandle.standardOutput
 
 	func run() {
+		if CommandLine.arguments.contains("serve") {
+			runServer(socketPath: argumentValue("--socket") ?? defaultSocketPath())
+			return
+		}
 		while true {
 			autoreleasepool {
 				let data = FileHandle.standardInput.availableData
@@ -217,6 +225,50 @@ final class Bridge {
 				stdinBuffer.append(data)
 				processBufferedInput()
 			}
+		}
+	}
+
+	private func argumentValue(_ name: String) -> String? {
+		guard let index = CommandLine.arguments.firstIndex(of: name), CommandLine.arguments.indices.contains(index + 1) else { return nil }
+		return CommandLine.arguments[index + 1]
+	}
+
+	private func defaultSocketPath() -> String {
+		let home = FileManager.default.homeDirectoryForCurrentUser.path
+		return "\(home)/Library/Caches/pi-computer-use/bridge.sock"
+	}
+
+	private func runServer(socketPath: String) {
+		try? FileManager.default.createDirectory(atPath: (socketPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+		unlink(socketPath)
+		let server = socket(AF_UNIX, SOCK_STREAM, 0)
+		if server < 0 { exit(1) }
+		var address = sockaddr_un()
+		address.sun_family = sa_family_t(AF_UNIX)
+		let sunPathCapacity = MemoryLayout.size(ofValue: address.sun_path)
+		let bytes = Array(socketPath.utf8.prefix(sunPathCapacity - 1))
+		withUnsafeMutablePointer(to: &address.sun_path) { pointer in
+			pointer.withMemoryRebound(to: CChar.self, capacity: sunPathCapacity) { dest in
+				for (index, byte) in bytes.enumerated() { dest[index] = CChar(bitPattern: byte) }
+			}
+		}
+		let bindStatus = withUnsafePointer(to: &address) { pointer in
+			pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(server, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+		}
+		if bindStatus != 0 || listen(server, 8) != 0 { close(server); exit(1) }
+		while true {
+			let client = accept(server, nil, nil)
+			if client < 0 { continue }
+			stdinBuffer.removeAll()
+			output = FileHandle(fileDescriptor: client, closeOnDealloc: true)
+			while true {
+				let data = output.availableData
+				if data.isEmpty { break }
+				stdinBuffer.append(data)
+				processBufferedInput()
+			}
+			output.closeFile()
+			output = FileHandle.standardOutput
 		}
 	}
 
@@ -302,7 +354,7 @@ final class Bridge {
 		}
 
 		if let out = (line + "\n").data(using: .utf8) {
-			FileHandle.standardOutput.write(out)
+			output.write(out)
 		}
 	}
 
@@ -310,6 +362,8 @@ final class Bridge {
 		let cmd = try stringArg(request, "cmd")
 
 		switch cmd {
+		case "diagnostics":
+			return diagnostics()
 		case "checkPermissions":
 			return checkPermissions()
 		case "openPermissionPane":
@@ -334,6 +388,8 @@ final class Bridge {
 			return try setWindowFrame(request)
 		case "screenshot":
 			return try screenshot(request)
+		case "visionTargets":
+			return try visionTargets(request)
 		case "mouseClick":
 			return try mouseClick(request)
 		case "mouseMove":
@@ -372,6 +428,8 @@ final class Bridge {
 			return try focusedElement(request)
 		case "setValue":
 			return try setValue(request)
+		case "selectText":
+			return try selectText(request)
 		case "axReadText":
 			return try axReadText(request)
 		case "typeText":
@@ -442,6 +500,46 @@ final class Bridge {
 		throw BridgeFailure(message: "Missing numeric argument '\(key)'", code: "invalid_args")
 	}
 
+	private func processPath(pid: pid_t) -> String? {
+		var buffer = [CChar](repeating: 0, count: 4096)
+		let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+		return length > 0 ? String(cString: buffer) : nil
+	}
+
+	private func diagnostics() -> [String: Any] {
+		let permissions = checkPermissions()
+		#if arch(arm64)
+		let arch = "arm64"
+		#elseif arch(x86_64)
+		let arch = "x86_64"
+		#else
+		let arch = "unknown"
+		#endif
+		let parentPid = Int32(getppid())
+		let parentApp = NSRunningApplication(processIdentifier: parentPid)
+		let parentPath = processPath(pid: parentPid)
+		var output: [String: Any] = [
+			"protocolVersion": protocolVersion,
+			"pid": Int32(getpid()),
+			"parentPid": parentPid,
+			"executablePath": CommandLine.arguments.first ?? "",
+			"macOS": ProcessInfo.processInfo.operatingSystemVersionString,
+			"arch": arch,
+			"accessibility": permissions["accessibility"] ?? false,
+			"screenRecording": permissions["screenRecording"] ?? false,
+		]
+		if let parentPath {
+			output["parentPath"] = parentPath
+		}
+		if let parentAppName = parentApp?.localizedName ?? parentPath.map({ URL(fileURLWithPath: $0).lastPathComponent }) {
+			output["parentAppName"] = parentAppName
+		}
+		if let parentBundleId = parentApp?.bundleIdentifier {
+			output["parentBundleId"] = parentBundleId
+		}
+		return output
+	}
+
 	private func checkPermissions() -> [String: Any] {
 		let accessibility = AXIsProcessTrusted()
 		let screenRecording: Bool
@@ -483,9 +581,15 @@ final class Bridge {
 		return ["opened": opened, "requested": requested]
 	}
 
+	private func pidIsAlive(_ pid: pid_t) -> Bool {
+		pid > 0 && kill(pid, 0) == 0
+	}
+
 	private func listApps() -> [[String: Any]] {
 		let frontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-		let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
+		let apps = NSWorkspace.shared.runningApplications.filter { app in
+			app.activationPolicy == .regular && pidIsAlive(app.processIdentifier)
+		}
 		return apps.map { app in
 			var data: [String: Any] = [
 				"appName": app.localizedName ?? "Unknown App",
@@ -689,6 +793,8 @@ final class Bridge {
 		var output: [[String: Any]] = []
 		for window in windows {
 			let axTitle = stringAttribute(window, attribute: kAXTitleAttribute as CFString) ?? ""
+			let axRole = stringAttribute(window, attribute: kAXRoleAttribute as CFString) ?? ""
+			let axSubrole = stringAttribute(window, attribute: kAXSubroleAttribute as CFString) ?? ""
 			let axFrame = frameForWindow(window)
 			let candidate = bestCandidate(frame: axFrame, title: axTitle, candidates: candidates, usedIds: usedIds)
 			if let candidate {
@@ -703,11 +809,17 @@ final class Bridge {
 			let isMinimized = boolAttribute(window, attribute: kAXMinimizedAttribute as CFString) ?? false
 			let isMain = boolAttribute(window, attribute: kAXMainAttribute as CFString) ?? false
 			let isFocused = boolAttribute(window, attribute: kAXFocusedAttribute as CFString) ?? false
+			let isModal = boolAttribute(window, attribute: "AXModal" as CFString) ?? false
+			let sheetCount = axElementArray(window, attribute: "AXSheets" as CFString).count
 			let scale = displayScaleFactor(for: effectiveFrame)
 
 			var item: [String: Any] = [
 				"windowRef": windowRef,
 				"title": title,
+				"role": axRole,
+				"subrole": axSubrole,
+				"isModal": isModal,
+				"sheetCount": sheetCount,
 				"framePoints": [
 					"x": effectiveFrame.origin.x,
 					"y": effectiveFrame.origin.y,
@@ -734,6 +846,56 @@ final class Bridge {
 		return try captureWindow(windowId: windowId, maxDimension: maxDimension)
 	}
 
+	private func visionTargets(_ request: [String: Any]) throws -> [String: Any] {
+		let windowId = UInt32(try intArg(request, "windowId"))
+		let maxDimension = optionalIntArg(request, "maxDimension").map { max(1, $0) }
+		let payload = try captureWindow(windowId: windowId, maxDimension: maxDimension)
+		guard let base64 = payload["pngBase64"] as? String,
+			let data = Data(base64Encoded: base64),
+			let imageRep = NSBitmapImageRep(data: data),
+			let image = imageRep.cgImage
+		else {
+			throw BridgeFailure(message: "Failed to capture image for vision grounding", code: "vision_capture_failed")
+		}
+		let minConfidence = max(0, min(1, (request["minConfidence"] as? NSNumber)?.doubleValue ?? 0.35))
+		let semaphore = DispatchSemaphore(value: 0)
+		let recognized = Box<[[String: Any]]>([])
+		let recognizedError = Box<Error?>(nil)
+		let request = VNRecognizeTextRequest { request, error in
+			defer { semaphore.signal() }
+			if let error {
+				recognizedError.value = error
+				return
+			}
+			let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
+			recognized.value = observations.compactMap { observation in
+				guard let candidate = observation.topCandidates(1).first, Double(candidate.confidence) >= minConfidence else { return nil }
+				let box = observation.boundingBox
+				let x = box.origin.x * Double(image.width)
+				let y = (1.0 - box.origin.y - box.height) * Double(image.height)
+				let w = box.width * Double(image.width)
+				let h = box.height * Double(image.height)
+				return [
+					"text": candidate.string,
+					"confidence": Double(candidate.confidence),
+					"x": x + w / 2,
+					"y": y + h / 2,
+					"frame": ["x": x, "y": y, "w": w, "h": h],
+				]
+			}
+		}
+		request.recognitionLevel = .accurate
+		request.usesLanguageCorrection = false
+		try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+		if semaphore.wait(timeout: .now() + .seconds(8)) == .timedOut {
+			throw BridgeFailure(message: "Vision grounding timed out", code: "vision_timeout")
+		}
+		if let error = recognizedError.value {
+			throw BridgeFailure(message: "Vision grounding failed: \(error.localizedDescription)", code: "vision_failed")
+		}
+		return ["targets": recognized.value, "width": image.width, "height": image.height]
+	}
+
 	private func mouseClick(_ request: [String: Any]) throws -> [String: Any] {
 		let windowId = UInt32(try intArg(request, "windowId"))
 		let x = try doubleArg(request, "x")
@@ -745,8 +907,9 @@ final class Bridge {
 		let captureHeight = max(1.0, (try? doubleArg(request, "captureHeight")) ?? 1.0)
 		let button = mouseButton(optionalStringArg(request, "button") ?? "left")
 		let clickCount = max(1, min(3, optionalIntArg(request, "clickCount") ?? 1))
+		let delivery = eventDelivery(request)
 		let point = try mapWindowPoint(windowId: windowId, x: x, y: y, captureWidth: captureWidth, captureHeight: captureHeight)
-		try postMouseClick(at: point, pid: targetPid, button: button, clickCount: clickCount)
+		try postMouseClick(at: point, pid: targetPid, button: button, clickCount: clickCount, delivery: delivery)
 		return ["clicked": true]
 	}
 
@@ -759,8 +922,9 @@ final class Bridge {
 		}
 		let captureWidth = max(1.0, (try? doubleArg(request, "captureWidth")) ?? 1.0)
 		let captureHeight = max(1.0, (try? doubleArg(request, "captureHeight")) ?? 1.0)
+		let delivery = eventDelivery(request)
 		let point = try mapWindowPoint(windowId: windowId, x: x, y: y, captureWidth: captureWidth, captureHeight: captureHeight)
-		try postMouseMove(to: point, pid: targetPid)
+		try postMouseMove(to: point, pid: targetPid, delivery: delivery)
 		return ["moved": true]
 	}
 
@@ -782,7 +946,7 @@ final class Bridge {
 			}
 			return try mapWindowPoint(windowId: windowId, x: x, y: y, captureWidth: captureWidth, captureHeight: captureHeight)
 		}
-		try postMouseDrag(points: points, pid: targetPid)
+		try postMouseDrag(points: points, pid: targetPid, delivery: eventDelivery(request))
 		return ["dragged": true]
 	}
 
@@ -798,7 +962,7 @@ final class Bridge {
 		let scrollX = optionalIntArg(request, "scrollX") ?? 0
 		let scrollY = optionalIntArg(request, "scrollY") ?? 0
 		let point = try mapWindowPoint(windowId: windowId, x: x, y: y, captureWidth: captureWidth, captureHeight: captureHeight)
-		try postScrollWheel(at: point, deltaX: scrollX, deltaY: scrollY, pid: targetPid)
+		try postScrollWheel(at: point, deltaX: scrollX, deltaY: scrollY, pid: targetPid, delivery: eventDelivery(request))
 		return ["scrolled": true]
 	}
 
@@ -809,7 +973,7 @@ final class Bridge {
 		guard let keys = request["keys"] as? [String], !keys.isEmpty else {
 			throw BridgeFailure(message: "keyPress requires at least one key", code: "invalid_args")
 		}
-		try postKeyPress(keys: keys, pid: targetPid)
+		try postKeyPress(keys: keys, pid: targetPid, delivery: eventDelivery(request))
 		return ["pressed": true]
 	}
 
@@ -1616,8 +1780,10 @@ final class Bridge {
 		let subrole = stringAttribute(element, attribute: kAXSubroleAttribute as CFString) ?? ""
 		let title = stringAttribute(element, attribute: kAXTitleAttribute as CFString) ?? ""
 		let description = stringAttribute(element, attribute: kAXDescriptionAttribute as CFString) ?? ""
+		let identifier = stringAttribute(element, attribute: "AXIdentifier" as CFString) ?? ""
 		let value = displayValue(element, role: role, subrole: subrole)
 		let frame = frameForElement(element)
+		let parentFrame = copyAttribute(element, attribute: kAXParentAttribute as CFString).flatMap(asAXElement).flatMap(frameForElement)
 		let centerX = frame.map { $0.midX } ?? 0
 		let centerY = frame.map { $0.midY } ?? 0
 		var valueSettable = DarwinBoolean(false)
@@ -1636,6 +1802,7 @@ final class Bridge {
 			"subrole": subrole,
 			"title": title,
 			"description": description,
+			"identifier": identifier,
 			"value": value,
 			"actions": actions,
 			"isTextInput": textRoles.contains(role),
@@ -1650,6 +1817,9 @@ final class Bridge {
 		]
 		if let frame {
 			payload["frame"] = ["x": frame.origin.x, "y": frame.origin.y, "w": frame.width, "h": frame.height]
+		}
+		if let parentFrame {
+			payload["parentFrame"] = ["x": parentFrame.origin.x, "y": parentFrame.origin.y, "w": parentFrame.width, "h": parentFrame.height]
 		}
 		if let score {
 			payload["score"] = score
@@ -1768,6 +1938,25 @@ final class Bridge {
 		return ["set": true]
 	}
 
+	private func selectText(_ request: [String: Any]) throws -> [String: Any] {
+		let elementRef = try stringArg(request, "elementRef")
+		guard let element = refStore.element(for: elementRef) else {
+			throw BridgeFailure(message: "Element reference is no longer valid", code: "element_ref_invalid")
+		}
+		let role = stringAttribute(element, attribute: kAXRoleAttribute as CFString) ?? ""
+		let subrole = stringAttribute(element, attribute: kAXSubroleAttribute as CFString) ?? ""
+		let value = displayValue(element, role: role, subrole: subrole)
+		var range = CFRange(location: max(0, optionalIntArg(request, "start") ?? 0), length: max(0, optionalIntArg(request, "length") ?? value.count))
+		guard let axRange = AXValueCreate(.cfRange, &range) else {
+			throw BridgeFailure(message: "Failed to create selected text range", code: "select_text_failed")
+		}
+		let status = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, axRange)
+		if status != .success {
+			throw BridgeFailure(message: "Failed to select text (AX error \(status.rawValue))", code: "select_text_failed")
+		}
+		return ["selected": true, "length": range.length]
+	}
+
 	private func axReadText(_ request: [String: Any]) throws -> [String: Any] {
 		let elementRef = try stringArg(request, "elementRef")
 		let offset = max(0, optionalIntArg(request, "offset") ?? 0)
@@ -1802,7 +1991,7 @@ final class Bridge {
 		guard let targetPid = optionalIntArg(request, "pid").map({ Int32($0) }) else {
 			throw BridgeFailure(message: "typeText requires pid in non-intrusive mode", code: "pid_required")
 		}
-		try postUnicodeText(text, pid: targetPid)
+		try postUnicodeText(text, pid: targetPid, delivery: eventDelivery(request))
 		return ["typed": true]
 	}
 
@@ -2210,15 +2399,35 @@ final class Bridge {
 		return CGPoint(x: screenX, y: screenY)
 	}
 
-	private func postEvent(_ event: CGEvent, pid: Int32) {
-		event.postToPid(pid)
+	private func eventDelivery(_ request: [String: Any]) -> String {
+		optionalStringArg(request, "delivery") == "pid" ? "pid" : "hid"
 	}
 
-	private func postMouseMove(to point: CGPoint, pid: Int32) throws {
+	private func postEvent(_ event: CGEvent, pid: Int32, delivery: String = "hid") {
+		if delivery == "pid" {
+			event.postToPid(pid)
+			return
+		}
+		// Post as a real foreground HID event. AppKit views with mouseDown handlers
+		// can ignore pid-targeted CGEvents even though postToPid reports success.
+		// Keep the target app frontmost so the HID event is delivered to the intended
+		// window, then post at the session event tap.
+		if let app = NSRunningApplication(processIdentifier: pid), !app.isActive {
+			if #available(macOS 14.0, *) {
+				_ = app.activate()
+			} else {
+				_ = app.activate(options: [.activateIgnoringOtherApps])
+			}
+			usleep(20_000)
+		}
+		event.post(tap: .cghidEventTap)
+	}
+
+	private func postMouseMove(to point: CGPoint, pid: Int32, delivery: String = "hid") throws {
 		guard let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) else {
 			throw BridgeFailure(message: "Failed to create mouse move event", code: "input_failed")
 		}
-		postEvent(move, pid: pid)
+		postEvent(move, pid: pid, delivery: delivery)
 	}
 
 	private func mouseButton(_ name: String) -> CGMouseButton {
@@ -2265,8 +2474,8 @@ final class Bridge {
 		}
 	}
 
-	private func postMouseClick(at point: CGPoint, pid: Int32, button: CGMouseButton = .left, clickCount: Int = 1) throws {
-		try postMouseMove(to: point, pid: pid)
+	private func postMouseClick(at point: CGPoint, pid: Int32, button: CGMouseButton = .left, clickCount: Int = 1, delivery: String = "hid") throws {
+		try postMouseMove(to: point, pid: pid, delivery: delivery)
 		for index in 1...max(1, clickCount) {
 			guard let down = CGEvent(mouseEventSource: nil, mouseType: mouseDownType(for: button), mouseCursorPosition: point, mouseButton: button),
 				let up = CGEvent(mouseEventSource: nil, mouseType: mouseUpType(for: button), mouseCursorPosition: point, mouseButton: button)
@@ -2275,31 +2484,31 @@ final class Bridge {
 			}
 			down.setIntegerValueField(.mouseEventClickState, value: Int64(index))
 			up.setIntegerValueField(.mouseEventClickState, value: Int64(index))
-			postEvent(down, pid: pid)
+			postEvent(down, pid: pid, delivery: delivery)
 			usleep(12_000)
-			postEvent(up, pid: pid)
+			postEvent(up, pid: pid, delivery: delivery)
 			if index < clickCount {
 				usleep(70_000)
 			}
 		}
 	}
 
-	private func postMouseDrag(points: [CGPoint], pid: Int32) throws {
+	private func postMouseDrag(points: [CGPoint], pid: Int32, delivery: String = "hid") throws {
 		guard points.count >= 2, let first = points.first else {
 			throw BridgeFailure(message: "Drag requires at least two points", code: "invalid_args")
 		}
-		try postMouseMove(to: first, pid: pid)
+		try postMouseMove(to: first, pid: pid, delivery: delivery)
 		guard let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: first, mouseButton: .left) else {
 			throw BridgeFailure(message: "Failed to create mouse down event", code: "input_failed")
 		}
-		postEvent(down, pid: pid)
+		postEvent(down, pid: pid, delivery: delivery)
 		usleep(12_000)
 
 		for point in points.dropFirst() {
 			guard let drag = CGEvent(mouseEventSource: nil, mouseType: mouseDraggedType(for: .left), mouseCursorPosition: point, mouseButton: .left) else {
 				throw BridgeFailure(message: "Failed to create mouse drag event", code: "input_failed")
 			}
-			postEvent(drag, pid: pid)
+			postEvent(drag, pid: pid, delivery: delivery)
 			usleep(8_000)
 		}
 
@@ -2308,11 +2517,11 @@ final class Bridge {
 		else {
 			throw BridgeFailure(message: "Failed to create mouse up event", code: "input_failed")
 		}
-		postEvent(up, pid: pid)
+		postEvent(up, pid: pid, delivery: delivery)
 	}
 
-	private func postScrollWheel(at point: CGPoint, deltaX: Int, deltaY: Int, pid: Int32) throws {
-		try postMouseMove(to: point, pid: pid)
+	private func postScrollWheel(at point: CGPoint, deltaX: Int, deltaY: Int, pid: Int32, delivery: String = "hid") throws {
+		try postMouseMove(to: point, pid: pid, delivery: delivery)
 		guard let event = CGEvent(
 			scrollWheelEvent2Source: nil,
 			units: .pixel,
@@ -2324,7 +2533,7 @@ final class Bridge {
 			throw BridgeFailure(message: "Failed to create scroll event", code: "input_failed")
 		}
 		event.location = point
-		postEvent(event, pid: pid)
+		postEvent(event, pid: pid, delivery: delivery)
 	}
 
 	private func modifierFlag(_ key: String) -> CGEventFlags? {
@@ -2376,9 +2585,9 @@ final class Bridge {
 		return (flags, keys.last ?? "")
 	}
 
-	private func postKeyPress(keys: [String], pid: Int32) throws {
+	private func postKeyPress(keys: [String], pid: Int32, delivery: String = "hid") throws {
 		if let chord = keyChord(keys) {
-			try postKey(chord.key, flags: chord.flags, pid: pid)
+			try postKey(chord.key, flags: chord.flags, pid: pid, delivery: delivery)
 			return
 		}
 
@@ -2388,17 +2597,17 @@ final class Bridge {
 				.map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
 				.filter { !$0.isEmpty }
 			if let chord = keyChord(parts) {
-				try postKey(chord.key, flags: chord.flags, pid: pid)
+				try postKey(chord.key, flags: chord.flags, pid: pid, delivery: delivery)
 			} else {
-				try postKey(key, flags: [], pid: pid)
+				try postKey(key, flags: [], pid: pid, delivery: delivery)
 			}
 		}
 	}
 
-	private func postKey(_ key: String, flags: CGEventFlags, pid: Int32) throws {
+	private func postKey(_ key: String, flags: CGEventFlags, pid: Int32, delivery: String = "hid") throws {
 		guard let code = keyCode(key) else {
 			if key.count == 1 {
-				try postUnicodeText(key, pid: pid)
+				try postUnicodeText(key, pid: pid, delivery: delivery)
 				return
 			}
 			throw BridgeFailure(message: "Unsupported key '\(key)'", code: "invalid_args")
@@ -2410,12 +2619,12 @@ final class Bridge {
 		}
 		down.flags = flags
 		up.flags = flags
-		postEvent(down, pid: pid)
+		postEvent(down, pid: pid, delivery: delivery)
 		usleep(8_000)
-		postEvent(up, pid: pid)
+		postEvent(up, pid: pid, delivery: delivery)
 	}
 
-	private func postUnicodeText(_ text: String, pid: Int32) throws {
+	private func postUnicodeText(_ text: String, pid: Int32, delivery: String = "hid") throws {
 		for scalar in text.unicodeScalars {
 			let char = String(scalar)
 			guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
@@ -2425,9 +2634,9 @@ final class Bridge {
 			}
 			setUnicodeString(event: down, text: char)
 			setUnicodeString(event: up, text: char)
-			postEvent(down, pid: pid)
+			postEvent(down, pid: pid, delivery: delivery)
 			usleep(8_000)
-			postEvent(up, pid: pid)
+			postEvent(up, pid: pid, delivery: delivery)
 		}
 	}
 

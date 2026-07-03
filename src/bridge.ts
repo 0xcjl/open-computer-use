@@ -56,6 +56,7 @@ export interface TypeTextParams extends WindowTargetParams {
 export interface SetTextParams extends WindowTargetParams {
 	text: string;
 	ref?: string;
+	method?: "ax" | "keyboard";
 }
 
 export interface KeypressParams extends WindowTargetParams {
@@ -168,6 +169,10 @@ interface ActivationFlags {
 }
 
 type ExecutionVariant = "stealth" | "default";
+type NativeInputDelivery = "pid" | "hid";
+type ActionDelivery = "ax" | NativeInputDelivery;
+type DeliveryPolicy = "ax_only" | "background" | "default";
+type Grounding = "ax" | "vision";
 
 interface ExecutionTrace {
 	strategy:
@@ -182,13 +187,20 @@ interface ExecutionTrace {
 		| "coordinate_event_move"
 		| "coordinate_event_drag"
 		| "coordinate_event_scroll"
+		| "pid_event_click"
+		| "pid_event_double_click"
+		| "pid_event_move"
+		| "pid_event_drag"
+		| "pid_event_scroll"
 		| "ax_scroll"
 		| "ax_action"
 		| "browser_open_location"
 		| "cdp_navigate"
 		| "ax_set_value"
 		| "raw_keypress"
-		| "raw_key_text";
+		| "raw_key_text"
+		| "pid_keypress"
+		| "pid_key_text";
 	axAttempted?: boolean;
 	axSucceeded?: boolean;
 	fallbackUsed?: boolean;
@@ -196,6 +208,11 @@ interface ExecutionTrace {
 	variant?: ExecutionVariant;
 	stealthCompatible?: boolean;
 	nonStealthReason?: string;
+	grounding?: Grounding;
+	delivery?: ActionDelivery;
+	deliveryPolicy?: DeliveryPolicy;
+	coordinateStateChanged?: boolean;
+	coordinateVerification?: "ax_signature_changed" | "no_observable_change" | "unavailable";
 	actionCount?: number;
 	completedActionCount?: number;
 	actions?: BatchActionTrace[];
@@ -213,6 +230,25 @@ interface BatchActionTrace {
 	variant?: ExecutionVariant;
 	stealthCompatible?: boolean;
 	nonStealthReason?: string;
+	grounding?: Grounding;
+	delivery?: ActionDelivery;
+	deliveryPolicy?: DeliveryPolicy;
+	coordinateStateChanged?: boolean;
+	coordinateVerification?: ExecutionTrace["coordinateVerification"];
+}
+
+interface HelperDiagnostics {
+	protocolVersion: number;
+	pid: number;
+	parentPid?: number;
+	parentAppName?: string;
+	parentBundleId?: string;
+	parentPath?: string;
+	executablePath?: string;
+	macOS?: string;
+	arch?: string;
+	accessibility?: boolean;
+	screenRecording?: boolean;
 }
 
 export interface ComputerUseDetails {
@@ -235,12 +271,14 @@ export interface ComputerUseDetails {
 		coordinateSpace: "window-relative-screenshot-pixels";
 	};
 	axTargets?: AxTarget[];
+	visionTargets?: VisionTarget[];
 	activation: ActivationFlags;
 	execution: ExecutionTrace;
 	config?: {
 		browser_use: boolean;
 		stealth_mode: boolean;
 	};
+	helper?: HelperDiagnostics;
 	status?: "ok";
 	axDiagnostics?: {
 		reason?: string;
@@ -273,6 +311,7 @@ export interface ListAppsDetails {
 		browser_use: boolean;
 		stealth_mode: boolean;
 	};
+	helper?: HelperDiagnostics;
 }
 
 export interface ListWindowsDetails {
@@ -292,6 +331,10 @@ export interface ListWindowsDetails {
 		isOnscreen: boolean;
 		isMain: boolean;
 		isFocused: boolean;
+		isModal: boolean;
+		sheetCount: number;
+		role?: string;
+		subrole?: string;
 		browserUseAllowed: boolean;
 		score: number;
 	}>;
@@ -394,12 +437,16 @@ interface HelperWindow {
 	windowId?: number;
 	windowRef?: string;
 	title: string;
+	role?: string;
+	subrole?: string;
 	framePoints: FramePoints;
 	scaleFactor: number;
 	isMinimized: boolean;
 	isOnscreen: boolean;
 	isMain: boolean;
 	isFocused: boolean;
+	isModal: boolean;
+	sheetCount: number;
 }
 
 interface FrontmostResult {
@@ -415,6 +462,15 @@ interface ScreenshotPayload {
 	width: number;
 	height: number;
 	scaleFactor: number;
+}
+
+interface VisionTarget {
+	ref: string;
+	text: string;
+	confidence: number;
+	x: number;
+	y: number;
+	frame?: FramePoints;
 }
 
 interface FocusedElementResult {
@@ -449,6 +505,7 @@ interface HelperAxTarget {
 	subrole?: string;
 	title?: string;
 	description?: string;
+	identifier?: string;
 	value?: string;
 	actions?: string[];
 	source?: string;
@@ -461,6 +518,8 @@ interface HelperAxTarget {
 	canDecrement?: boolean;
 	x?: number;
 	y?: number;
+	frame?: Partial<FramePoints>;
+	parentFrame?: Partial<FramePoints>;
 	score?: number;
 	depth?: number;
 }
@@ -499,6 +558,7 @@ interface AxTarget {
 	subrole: string;
 	title: string;
 	description: string;
+	identifier: string;
 	value: string;
 	actions: string[];
 	source: AxTargetSource;
@@ -511,6 +571,8 @@ interface AxTarget {
 	canDecrement: boolean;
 	x: number;
 	y: number;
+	frame?: FramePoints;
+	parentFrame?: FramePoints;
 	score?: number;
 	depth?: number;
 }
@@ -543,6 +605,7 @@ interface RuntimeState {
 	currentStateTarget?: StateTargetSnapshot;
 	currentImageMode?: ImageMode;
 	currentAxTargets?: AxTarget[];
+	currentVisionTargets?: VisionTarget[];
 	browserSnapshots: Map<string, CdpPageSnapshot>;
 	windowRefs: Map<string, WindowRefRecord>;
 	windowRefByIdentity: Map<string, string>;
@@ -551,12 +614,14 @@ interface RuntimeState {
 	allowNextTypeTextAxReplacement?: boolean;
 	pendingBrowserAddress?: PendingBrowserAddress;
 	helper?: ChildProcessWithoutNullStreams;
+	daemonAvailable?: boolean;
 	managedBrowser?: ChildProcess;
 	helperStdoutBuffer: string;
 	pending: Map<string, PendingRequest>;
 	requestSequence: number;
 	queueTail: Promise<void>;
 	permissionStatus?: PermissionStatus;
+	helperDiagnostics?: HelperDiagnostics;
 	lastPermissionCheckAt: number;
 	helperInstallChecked: boolean;
 }
@@ -593,6 +658,7 @@ const CURRENT_TARGET_GONE_ERROR =
 const NON_MACOS_ERROR = "pi-computer-use currently supports macOS 12+ only.";
 
 const COMMAND_TIMEOUT_MS = 15_000;
+const HELPER_PROTOCOL_VERSION = 1;
 const SCREENSHOT_TIMEOUT_MS = 25_000;
 const HELPER_SETUP_TIMEOUT_MS = 60_000;
 const ACTION_SETTLE_MS = 280;
@@ -659,6 +725,8 @@ const HELIUM_EXECUTABLE = "/Applications/Helium.app/Contents/MacOS/Helium";
 const CHROME_EXECUTABLE = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 export const HELPER_STABLE_PATH = path.join(os.homedir(), ".pi", "agent", "helpers", "pi-computer-use", "bridge");
+const HELPER_APP_PATH = path.join(os.homedir(), ".pi", "agent", "helpers", "pi-computer-use", "PiComputerUseBridge.app");
+const HELPER_SOCKET_PATH = path.join(os.homedir(), "Library", "Caches", "pi-computer-use", "bridge.sock");
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SETUP_HELPER_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "setup-helper.mjs");
@@ -729,6 +797,29 @@ function currentRuntimeMode(): ExecutionVariant {
 	return isStrictAxMode() ? "stealth" : "default";
 }
 
+function currentDeliveryPolicy(): DeliveryPolicy {
+	if (isStrictAxMode()) return "ax_only";
+	const value = (process.env.PI_COMPUTER_USE_DELIVERY_POLICY ?? process.env.PI_COMPUTER_USE_EVENT_DELIVERY ?? "default").toLowerCase();
+	return value === "background" || value === "pid" ? "background" : value === "ax_only" || value === "ax-only" ? "ax_only" : "default";
+}
+
+function nativeInputDelivery(): NativeInputDelivery {
+	return currentDeliveryPolicy() === "background" ? "pid" : "hid";
+}
+
+function inferredTraceGrounding(strategy: ExecutionTrace["strategy"]): Grounding | undefined {
+	if (strategy.startsWith("ax_")) return "ax";
+	if (strategy.startsWith("coordinate_") || strategy.startsWith("pid_event_")) return "vision";
+	return undefined;
+}
+
+function inferredTraceDelivery(strategy: ExecutionTrace["strategy"]): ActionDelivery | undefined {
+	if (strategy.startsWith("ax_")) return "ax";
+	if (strategy.startsWith("pid_")) return "pid";
+	if (strategy.startsWith("coordinate_") || strategy.startsWith("raw_")) return "hid";
+	return undefined;
+}
+
 function executionTrace(
 	strategy: ExecutionTrace["strategy"],
 	variant: ExecutionVariant,
@@ -739,6 +830,8 @@ function executionTrace(
 		runtimeMode: currentRuntimeMode(),
 		variant,
 		stealthCompatible: variant === "stealth",
+		grounding: metadata.grounding ?? inferredTraceGrounding(strategy),
+		delivery: metadata.delivery ?? inferredTraceDelivery(strategy),
 		...metadata,
 	};
 }
@@ -912,6 +1005,28 @@ function ensurePointIsInCapture(
 	}
 }
 
+function screenPointToCapturePoint(
+	target: Pick<ResolvedTarget, "framePoints">,
+	capture: CurrentCapture,
+	screenX: number,
+	screenY: number,
+): { x: number; y: number } {
+	const frame = target.framePoints;
+	const relX = frame.w > 0 ? (screenX - frame.x) / frame.w : 0;
+	const relY = frame.h > 0 ? (screenY - frame.y) / frame.h : 0;
+	return {
+		x: Math.max(0, Math.min(capture.width - 1, relX * capture.width)),
+		y: Math.max(0, Math.min(capture.height - 1, relY * capture.height)),
+	};
+}
+
+function axCoordinateFallbackPoint(target: AxTarget): { x: number; y: number } {
+	const frame = target.frame;
+	const parent = target.parentFrame;
+	const parentLooksLikeRow = frame && parent && parent.w > frame.w * 1.5 && parent.h >= frame.h && parent.h <= frame.h * 3;
+	return parentLooksLikeRow ? { x: parent.x + parent.w / 2, y: frame.y + frame.h / 2 } : { x: target.x, y: target.y };
+}
+
 function normalizeDragPath(path: DragParams["path"], capture: CurrentCapture): Array<{ x: number; y: number }> {
 	if (!Array.isArray(path) || path.length < 2) {
 		throw new Error("drag.path must contain at least two points.");
@@ -975,6 +1090,29 @@ function parseAxTargetSource(value: unknown): AxTargetSource {
 	return value === "desktop_ax" || value === "browser_chrome_ax" || value === "web_content_ax" ? value : "unknown_ax";
 }
 
+function parseVisionTargets(result: unknown): VisionTarget[] {
+	const items = Array.isArray(result) ? result : (isRecord(result) ? result.targets : undefined);
+	if (!Array.isArray(items)) return [];
+	return items
+		.map((raw, index) => {
+			const text = toOptionalString((raw as any)?.text);
+			if (!text) return undefined;
+			return {
+				ref: `@v${index + 1}`,
+				text,
+				confidence: Math.max(0, Math.min(1, toFiniteNumber((raw as any)?.confidence, 0))),
+				x: toFiniteNumber((raw as any)?.x, 0),
+				y: toFiniteNumber((raw as any)?.y, 0),
+				frame: parseOptionalFramePoints((raw as any)?.frame),
+			} as VisionTarget;
+		})
+		.filter((item): item is VisionTarget => Boolean(item));
+}
+
+function formatVisionTargetLabel(target: VisionTarget): string {
+	return `${target.ref} vision ${JSON.stringify(target.text)} at (${Math.round(target.x)},${Math.round(target.y)}) confidence=${target.confidence.toFixed(2)}`;
+}
+
 function previewAxText(value: unknown): string {
 	const text = toOptionalString(value) ?? "";
 	return text.length > AX_TARGET_TEXT_PREVIEW_CHARS ? `${text.slice(0, AX_TARGET_TEXT_PREVIEW_CHARS)}…` : text;
@@ -997,6 +1135,7 @@ function parseAxTargets(result: unknown): AxTarget[] {
 				subrole: toOptionalString(target?.subrole) ?? "",
 				title: previewAxText(target?.title),
 				description: previewAxText(target?.description),
+				identifier: previewAxText(target?.identifier),
 				value: previewAxText(target?.value),
 				actions,
 				source: parseAxTargetSource(target?.source),
@@ -1009,6 +1148,8 @@ function parseAxTargets(result: unknown): AxTarget[] {
 				canDecrement: toBoolean(target?.canDecrement),
 				x: toFiniteNumber(target?.x, 0),
 				y: toFiniteNumber(target?.y, 0),
+				frame: parseOptionalFramePoints(target?.frame),
+				parentFrame: parseOptionalFramePoints(target?.parentFrame),
 				score: Number.isFinite(target?.score) ? Number(target.score) : undefined,
 				depth: Number.isFinite(target?.depth) ? Math.trunc(Number(target.depth)) : undefined,
 			} as AxTarget;
@@ -1018,6 +1159,7 @@ function parseAxTargets(result: unknown): AxTarget[] {
 
 function formatAxTargetLabel(target: AxTarget): string {
 	const label = target.title || target.description || target.value || "(unlabeled)";
+	const identifier = target.identifier ? ` id=${JSON.stringify(target.identifier)}` : "";
 	const capabilities = [
 		target.canSetValue ? "setValue" : undefined,
 		target.canPress ? "press" : undefined,
@@ -1026,7 +1168,11 @@ function formatAxTargetLabel(target: AxTarget): string {
 		target.canIncrement || target.canDecrement ? "adjust" : undefined,
 	].filter((item): item is string => Boolean(item));
 	const source = target.source !== "unknown_ax" ? ` source=${target.source}` : "";
-	return `${target.ref} ${target.role}${target.subrole ? `/${target.subrole}` : ""}${source} ${JSON.stringify(label)}${capabilities.length ? ` [${capabilities.join(",")}]` : ""}`;
+	return `${target.ref} ${target.role}${target.subrole ? `/${target.subrole}` : ""}${source}${identifier} ${JSON.stringify(label)}${capabilities.length ? ` [${capabilities.join(",")}]` : ""}`;
+}
+
+function visionTargetByRef(ref: string): VisionTarget | undefined {
+	return runtimeState.currentVisionTargets?.find((candidate) => candidate.ref === ref);
 }
 
 function axTargetByRef(ref: string): AxTarget {
@@ -1067,9 +1213,11 @@ async function reacquireAxTarget(stale: AxTarget, target: ResolvedTarget, signal
 	if (!refreshed.length) return undefined;
 
 	const staleLabel = axTargetLabelKey(stale);
+	const staleIdentifier = normalizeText(stale.identifier);
 	const candidates = refreshed.filter((candidate) => {
 		if (candidate.role !== stale.role) return false;
-		if (staleLabel && axTargetLabelKey(candidate) !== staleLabel) return false;
+		if (staleIdentifier && normalizeText(candidate.identifier) !== staleIdentifier) return false;
+		if (!staleIdentifier && staleLabel && axTargetLabelKey(candidate) !== staleLabel) return false;
 		if (stale.canSetValue && !candidate.canSetValue) return false;
 		if (stale.canPress && !candidate.canPress) return false;
 		if (stale.canScroll && !candidate.canScroll) return false;
@@ -1077,7 +1225,7 @@ async function reacquireAxTarget(stale: AxTarget, target: ResolvedTarget, signal
 		if (stale.canDecrement && !candidate.canDecrement) return false;
 		return true;
 	});
-	const pool = candidates.length ? candidates : refreshed.filter((candidate) => staleLabel && axTargetLabelKey(candidate) === staleLabel);
+	const pool = candidates.length ? candidates : refreshed.filter((candidate) => staleIdentifier ? normalizeText(candidate.identifier) === staleIdentifier : staleLabel && axTargetLabelKey(candidate) === staleLabel);
 	const best = pool.sort((a, b) => Math.hypot(a.x - stale.x, a.y - stale.y) - Math.hypot(b.x - stale.x, b.y - stale.y))[0];
 	return best ? { ...best, ref: stale.ref } : undefined;
 }
@@ -1351,12 +1499,76 @@ async function ensureBridgeProcess(): Promise<ChildProcessWithoutNullStreams> {
 	return await startBridgeProcess();
 }
 
+async function launchHelperDaemon(signal?: AbortSignal): Promise<void> {
+	if (process.env.PI_COMPUTER_USE_HELPER_DAEMON === "0") return;
+	await runProcess("open", ["-n", "-g", HELPER_APP_PATH, "--args", "serve", "--socket", HELPER_SOCKET_PATH], COMMAND_TIMEOUT_MS, signal);
+}
+
+async function daemonCommand<T>(cmd: string, args: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+	return await new Promise<T>((resolve, reject) => {
+		const id = `req_${++runtimeState.requestSequence}`;
+		const socket = net.createConnection(HELPER_SOCKET_PATH);
+		let buffer = "";
+		const timer = setTimeout(() => { socket.destroy(); reject(new HelperTransportError(`Daemon command '${cmd}' timed out after ${timeoutMs}ms.`)); }, timeoutMs);
+		const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); };
+		const onAbort = () => { socket.destroy(); cleanup(); reject(new Error("Operation aborted.")); };
+		signal?.addEventListener("abort", onAbort, { once: true });
+		socket.setEncoding("utf8");
+		socket.on("connect", () => socket.write(`${JSON.stringify({ id, cmd, ...args })}\n`));
+		socket.on("data", (chunk) => {
+			buffer += chunk;
+			const newline = buffer.indexOf("\n");
+			if (newline < 0) return;
+			cleanup();
+			socket.end();
+			try {
+				const parsed = JSON.parse(buffer.slice(0, newline));
+				if (parsed.ok === true) resolve(parsed.result as T);
+				else reject(new HelperCommandError(parsed?.error?.message ?? `Daemon command '${cmd}' failed.`, parsed?.error?.code));
+			} catch (error) {
+				reject(error);
+			}
+		});
+		socket.on("error", (error) => { cleanup(); reject(new HelperTransportError(error.message)); });
+	});
+}
+
+async function ensureDaemon(signal?: AbortSignal): Promise<boolean> {
+	if (process.env.PI_COMPUTER_USE_HELPER_DAEMON === "0") return false;
+	if (runtimeState.daemonAvailable) return true;
+	try {
+		await daemonCommand("diagnostics", {}, 1_000, signal);
+		runtimeState.daemonAvailable = true;
+		return true;
+	} catch {}
+	await launchHelperDaemon(signal).catch(() => undefined);
+	for (let index = 0; index < 30; index += 1) {
+		try {
+			await daemonCommand("diagnostics", {}, 1_000, signal);
+			runtimeState.daemonAvailable = true;
+			return true;
+		} catch {
+			await sleep(100, signal);
+		}
+	}
+	return false;
+}
+
 async function bridgeCommand<T>(
 	cmd: string,
 	args: Record<string, unknown> = {},
 	options?: { timeoutMs?: number; signal?: AbortSignal },
 ): Promise<T> {
 	const timeoutMs = options?.timeoutMs ?? COMMAND_TIMEOUT_MS;
+
+	if (await ensureDaemon(options?.signal)) {
+		try {
+			return await daemonCommand<T>(cmd, args, timeoutMs, options?.signal);
+		} catch (error) {
+			runtimeState.daemonAvailable = false;
+			if (!(error instanceof HelperTransportError)) throw normalizeError(error);
+		}
+	}
 
 	for (let attempt = 0; attempt < 2; attempt += 1) {
 		throwIfAborted(options?.signal);
@@ -1424,6 +1636,32 @@ async function checkPermissions(signal?: AbortSignal): Promise<PermissionStatus>
 	};
 }
 
+async function helperDiagnostics(signal?: AbortSignal): Promise<HelperDiagnostics> {
+	const result = await bridgeCommand<any>("diagnostics", {}, { signal });
+	return {
+		protocolVersion: Math.trunc(toFiniteNumber(result?.protocolVersion, 0)),
+		pid: Math.trunc(toFiniteNumber(result?.pid, 0)),
+		parentPid: Math.trunc(toFiniteNumber(result?.parentPid, 0)) || undefined,
+		parentAppName: toOptionalString(result?.parentAppName),
+		parentBundleId: toOptionalString(result?.parentBundleId),
+		parentPath: toOptionalString(result?.parentPath),
+		executablePath: toOptionalString(result?.executablePath),
+		macOS: toOptionalString(result?.macOS),
+		arch: toOptionalString(result?.arch),
+		accessibility: toBoolean(result?.accessibility),
+		screenRecording: toBoolean(result?.screenRecording),
+	};
+}
+
+async function ensureHelperProtocol(signal?: AbortSignal): Promise<void> {
+	const diagnostics = await helperDiagnostics(signal);
+	runtimeState.helperDiagnostics = diagnostics;
+	if (diagnostics.protocolVersion !== HELPER_PROTOCOL_VERSION) {
+		stopBridge();
+		throw new Error(`pi-computer-use helper protocol mismatch: expected ${HELPER_PROTOCOL_VERSION}, got ${diagnostics.protocolVersion}. Restart Pi so the updated helper can be loaded.`);
+	}
+}
+
 async function ensureReady(ctx: ExtensionContext, signal?: AbortSignal): Promise<void> {
 	loadComputerUseConfig(ctx.cwd);
 
@@ -1434,6 +1672,7 @@ async function ensureReady(ctx: ExtensionContext, signal?: AbortSignal): Promise
 	throwIfAborted(signal);
 	await ensureHelperInstalled(signal);
 	await ensureBridgeProcess();
+	await ensureHelperProtocol(signal);
 
 	const now = Date.now();
 	const canUseCachedPermissions =
@@ -1450,6 +1689,10 @@ async function ensureReady(ctx: ExtensionContext, signal?: AbortSignal): Promise
 	runtimeState.lastPermissionCheckAt = now;
 
 	if (!status.accessibility || !status.screenRecording) {
+		const permissionPath = runtimeState.daemonAvailable ? HELPER_APP_PATH : HELPER_STABLE_PATH;
+		const parentHint = runtimeState.helperDiagnostics?.parentAppName
+			? `Launcher: ${runtimeState.helperDiagnostics.parentAppName}${runtimeState.helperDiagnostics.parentBundleId ? ` (${runtimeState.helperDiagnostics.parentBundleId})` : ""}. On some macOS versions Screen Recording may also need to remain enabled for this launcher.`
+			: undefined;
 		status = await ensurePermissions(
 			ctx,
 			{
@@ -1458,10 +1701,11 @@ async function ensureReady(ctx: ExtensionContext, signal?: AbortSignal): Promise
 					await bridgeCommand("openPermissionPane", { kind }, { signal: permissionSignal ?? signal });
 				},
 				copyHelperPathToClipboard: async (permissionSignal) => {
-					await runProcess("osascript", ["-e", `set the clipboard to "${escapeAppleScriptString(HELPER_STABLE_PATH)}"`], COMMAND_TIMEOUT_MS, permissionSignal ?? signal);
+					await runProcess("osascript", ["-e", `set the clipboard to "${escapeAppleScriptString(permissionPath)}"`], COMMAND_TIMEOUT_MS, permissionSignal ?? signal);
 				},
+				permissionHint: parentHint,
 			},
-			HELPER_STABLE_PATH,
+			permissionPath,
 			signal,
 		);
 	}
@@ -1503,6 +1747,12 @@ function parseFramePoints(raw: unknown): FramePoints {
 	};
 }
 
+function parseOptionalFramePoints(raw: unknown): FramePoints | undefined {
+	const frame = raw as Partial<FramePoints> | undefined;
+	if (!frame || ![frame.x, frame.y, frame.w, frame.h].every(Number.isFinite)) return undefined;
+	return { x: Number(frame.x), y: Number(frame.y), w: Math.max(1, Number(frame.w)), h: Math.max(1, Number(frame.h)) };
+}
+
 function parseWindows(result: unknown): HelperWindow[] {
 	const array = Array.isArray(result) ? result : (result as any)?.windows;
 	if (!Array.isArray(array)) return [];
@@ -1511,12 +1761,16 @@ function parseWindows(result: unknown): HelperWindow[] {
 		windowId: Number.isFinite((raw as any)?.windowId) ? Math.trunc((raw as any).windowId) : undefined,
 		windowRef: toOptionalString((raw as any)?.windowRef),
 		title: toOptionalString((raw as any)?.title) ?? "",
+		role: toOptionalString((raw as any)?.role),
+		subrole: toOptionalString((raw as any)?.subrole),
 		framePoints: parseFramePoints(raw),
 		scaleFactor: Math.max(1, toFiniteNumber((raw as any)?.scaleFactor, 1)),
 		isMinimized: toBoolean((raw as any)?.isMinimized),
 		isOnscreen: toBoolean((raw as any)?.isOnscreen),
 		isMain: toBoolean((raw as any)?.isMain),
 		isFocused: toBoolean((raw as any)?.isFocused),
+		isModal: toBoolean((raw as any)?.isModal),
+		sheetCount: Math.max(0, Math.trunc(toFiniteNumber((raw as any)?.sheetCount, 0))),
 	}));
 }
 
@@ -1552,6 +1806,8 @@ function formatWindowLine(window: ListWindowsDetails["windows"][number]): string
 	const flags = [
 		window.isFocused ? "focused" : undefined,
 		window.isMain ? "main" : undefined,
+		window.isModal ? "modal" : undefined,
+		window.sheetCount > 0 ? `sheets=${window.sheetCount}` : undefined,
 		window.isOnscreen ? "onscreen" : undefined,
 		window.isMinimized ? "minimized" : undefined,
 		window.browserUseAllowed ? undefined : "browser_use_disabled",
@@ -1728,8 +1984,14 @@ function choosePreferredWindow(windows: HelperWindow[], appName: string): Helper
 	return scored[0];
 }
 
+function isDialogLikeWindow(window: Pick<HelperWindow, "subrole" | "role">): boolean {
+	return /dialog|modal|sheet/i.test(`${window.role ?? ""} ${window.subrole ?? ""}`);
+}
+
 function scoreWindow(window: HelperWindow): number {
 	let score = 0;
+	if (window.isModal || isDialogLikeWindow(window)) score += 180;
+	if (window.sheetCount > 0) score += 160;
 	if (window.isFocused) score += 100;
 	if (window.isMain) score += 80;
 	if (!window.isMinimized) score += 40;
@@ -1921,6 +2183,13 @@ async function selectWindowIfProvided(selector: WindowSelector | undefined, sign
 	}
 }
 
+function shouldPreferForegroundModalWindow(current: HelperWindow, candidate: HelperWindow): boolean {
+	if (candidate.windowId === current.windowId && candidate.windowRef === current.windowRef) return false;
+	if (!candidate.isOnscreen || candidate.isMinimized) return false;
+	if (candidate.isModal || candidate.sheetCount > 0 || isDialogLikeWindow(candidate)) return scoreWindow(candidate) >= scoreWindow(current);
+	return false;
+}
+
 async function resolveCurrentTarget(signal?: AbortSignal): Promise<ResolvedTarget> {
 	const current = currentTargetOrThrow();
 	const windows = await listWindows(current.pid, signal);
@@ -1952,6 +2221,11 @@ async function resolveCurrentTarget(signal?: AbortSignal): Promise<ResolvedTarge
 	if (!match) {
 		throw new Error(CURRENT_TARGET_GONE_ERROR);
 	}
+
+	const modal = windows
+		.filter((window) => shouldPreferForegroundModalWindow(match!, window))
+		.sort((a, b) => scoreWindow(b) - scoreWindow(a))[0];
+	if (modal) match = modal;
 
 	const app: HelperApp = {
 		appName: current.appName,
@@ -2121,6 +2395,11 @@ async function helperScreenshot(windowId: number, signal?: AbortSignal, maxDimen
 	};
 }
 
+async function helperVisionTargets(windowId: number, signal?: AbortSignal, maxDimension?: number): Promise<VisionTarget[]> {
+	const result = await bridgeCommand<unknown>("visionTargets", { windowId, maxDimension }, { timeoutMs: SCREENSHOT_TIMEOUT_MS + 8_000, signal }).catch(() => undefined);
+	return parseVisionTargets(result);
+}
+
 function windowsByCaptureRecoveryPriority(
 	windows: HelperWindow[],
 	target: ResolvedTarget,
@@ -2181,6 +2460,7 @@ interface CaptureResult {
 	capture: CurrentCapture;
 	image?: ScreenshotPayload;
 	axTargets: AxTarget[];
+	visionTargets?: VisionTarget[];
 	axDiagnostics?: { reason?: string; message?: string; debug?: AxDiagnosticsDebug };
 	activation: ActivationFlags;
 }
@@ -2261,6 +2541,10 @@ async function buildToolResult(
 	if (fallbackReason) {
 		await ensureCaptureImage(result, signal, imageMode === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION);
 	}
+	if ((fallbackReason || imageMode === "always") && !result.visionTargets?.length && result.target.windowId > 0) {
+		result.visionTargets = await helperVisionTargets(result.target.windowId, signal, imageMode === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION);
+	}
+	runtimeState.currentVisionTargets = result.visionTargets;
 
 	const details: ComputerUseDetails = {
 		tool,
@@ -2282,11 +2566,13 @@ async function buildToolResult(
 			coordinateSpace: "window-relative-screenshot-pixels",
 		},
 		axTargets: result.axTargets,
+		visionTargets: result.visionTargets,
 		activation: result.activation,
 		execution,
 		axDiagnostics: result.axDiagnostics,
 		status: "ok",
 		config: getComputerUseConfig(),
+		helper: runtimeState.helperDiagnostics,
 		imageReason: fallbackReason?.reason,
 	};
 
@@ -2305,13 +2591,98 @@ async function buildToolResult(
 	const axTargetText = result.axTargets.length
 		? `\n\nPrefer these AX targets over coordinate clicks or focus-based text replacement when one matches your intent:\n${result.axTargets.map(formatAxTargetLabel).join("\n")}`
 		: "";
+	const visionText = result.visionTargets?.length
+		? `\n\nVision targets:\n${result.visionTargets.map(formatVisionTargetLabel).join("\n")}`
+		: "";
 	const fallbackText = fallbackReason ? `\n\n${fallbackReason.message}` : "";
-	const content: AgentToolResult<ComputerUseDetails>["content"] = [{ type: "text", text: `${summary}${consoleText}${axTargetText}${fallbackText}` }];
+	const content: AgentToolResult<ComputerUseDetails>["content"] = [{ type: "text", text: `${summary}${consoleText}${axTargetText}${visionText}${fallbackText}` }];
 	if (fallbackReason) {
 		content.push({ type: "image", data: result.image!.pngBase64, mimeType: "image/png" });
 	}
 
 	return { content, details };
+}
+
+async function mouseClickAtCapturePoint(
+	target: ResolvedTarget,
+	capture: CurrentCapture,
+	x: number,
+	y: number,
+	button: MouseButtonName,
+	clickCount: number,
+	delivery: NativeInputDelivery = nativeInputDelivery(),
+	signal?: AbortSignal,
+): Promise<void> {
+	ensurePointIsInCapture(x, y, capture);
+	await bridgeCommand(
+		"mouseClick",
+		{
+			...nativeWindowRequest(target),
+			x,
+			y,
+			button,
+			clickCount,
+			captureWidth: capture.width,
+			captureHeight: capture.height,
+			delivery,
+		},
+		{ signal, timeoutMs: COMMAND_TIMEOUT_MS },
+	);
+}
+
+interface CoordinateClickVerification {
+	stateChanged: boolean;
+	verification: ExecutionTrace["coordinateVerification"];
+}
+
+async function coordinateStateSignature(target: ResolvedTarget, signal?: AbortSignal): Promise<string | undefined> {
+	try {
+		const [focused, rawTargets] = await Promise.all([
+			bridgeCommand<FocusedElementResult>("focusedElement", nativeWindowRequest(target), { signal, timeoutMs: COMMAND_TIMEOUT_MS }).catch(() => undefined),
+			listAxTargetsRaw(target, 30, signal),
+		]);
+		const focusedSignature = focused?.exists
+			? [focused.role, focused.subrole, focused.isTextInput, focused.canSetValue].map((item) => String(item ?? "")).join(":")
+			: "none";
+		const targetSignature = parseAxTargets(rawTargets)
+			.map((candidate) => [candidate.role, candidate.subrole, axTargetLabelKey(candidate), Math.round(candidate.x), Math.round(candidate.y), candidate.canPress, candidate.canFocus].join(":"))
+			.join("|");
+		return `${focusedSignature}\n${targetSignature}`;
+	} catch {
+		return undefined;
+	}
+}
+
+async function verifiedCoordinateClick(
+	target: ResolvedTarget,
+	capture: CurrentCapture,
+	x: number,
+	y: number,
+	button: MouseButtonName,
+	clickCount: number,
+	delivery: NativeInputDelivery,
+	signal?: AbortSignal,
+): Promise<CoordinateClickVerification> {
+	const before = await coordinateStateSignature(target, signal);
+	await mouseClickAtCapturePoint(target, capture, x, y, button, clickCount, delivery, signal);
+	await sleep(80, signal);
+	const after = await coordinateStateSignature(target, signal);
+	if (!before || !after) return { stateChanged: false, verification: "unavailable" };
+	const stateChanged = before !== after;
+	return { stateChanged, verification: stateChanged ? "ax_signature_changed" : "no_observable_change" };
+}
+
+function visionClickPoint(visual: VisionTarget, capture: CurrentCapture): { x: number; y: number } {
+	const containers = (runtimeState.currentAxTargets ?? [])
+		.map((target) => target.frame)
+		.filter((frame): frame is FramePoints => Boolean(frame && frame.w > 80 && frame.h > 24));
+	const containing = containers
+		.filter((frame) => visual.y >= frame.y && visual.y <= frame.y + frame.h && visual.x >= frame.x && visual.x <= frame.x + frame.w)
+		.sort((a, b) => a.w * a.h - b.w * b.h)[0];
+	if (containing && containing.w > Math.max((visual.frame?.w ?? 0) * 2, 120)) {
+		return { x: Math.min(capture.width - 1, Math.max(0, containing.x + containing.w / 2)), y: visual.y };
+	}
+	return { x: visual.x, y: visual.y };
 }
 
 async function dispatchClick(
@@ -2325,8 +2696,33 @@ async function dispatchClick(
 	const y = toFiniteNumber(params.y, NaN);
 	const button = normalizeMouseButton(params.button);
 	const clickCount = normalizeClickCount(params.clickCount);
+	const delivery = nativeInputDelivery();
+	const deliveryPolicy = currentDeliveryPolicy();
+	const clickStrategy = (count = clickCount): ExecutionTrace["strategy"] => delivery === "pid" ? (count > 1 ? "pid_event_double_click" : "pid_event_click") : (count > 1 ? "coordinate_event_double_click" : "coordinate_event_click");
+	const nonStealthReason = delivery === "pid" ? "pid_routed_mouse_click" : "coordinate_mouse_click_requires_pointer_event";
+
+	const performCoordinateClick = async (clickX: number, clickY: number): Promise<CoordinateClickVerification> =>
+		await verifiedCoordinateClick(target, capture, clickX, clickY, button, clickCount, delivery, signal);
 
 	if (ref) {
+		const visual = visionTargetByRef(ref);
+		if (visual) {
+			if (isStrictAxMode()) strictModeBlock(`Vision ref '${ref}' requires coordinate input.`);
+			if (button !== "left") throw new Error(`Vision refs only support left-button clicks. Use coordinates for ${button}-click.`);
+			const point = visionClickPoint(visual, capture);
+			const verification = await performCoordinateClick(point.x, point.y);
+			return executionTrace(clickStrategy(), "default", {
+				axAttempted: false,
+				axSucceeded: false,
+				fallbackUsed: true,
+				nonStealthReason: delivery === "pid" ? "vision_ref_click_uses_pid_routed_mouse_click" : "vision_ref_click_uses_coordinate_mouse_click",
+				grounding: "vision",
+				delivery,
+				deliveryPolicy,
+				coordinateStateChanged: verification.stateChanged,
+				coordinateVerification: verification.verification,
+			});
+		}
 		if (button !== "left") {
 			throw new Error(`AX target refs only support left-button clicks. Use coordinates for ${button}-click.`);
 		}
@@ -2366,22 +2762,51 @@ async function dispatchClick(
 		};
 
 		const axTarget = axTargetByRef(ref);
+		const originalAxTargets = runtimeState.currentAxTargets;
+		let reacquiredTarget: AxTarget | undefined;
 		let { clickedViaAX, focusedViaAX } = await attemptRefClick(axTarget);
 		if (!clickedViaAX && !focusedViaAX) {
 			const reacquired = await reacquireAxTarget(axTarget, target, signal);
 			if (reacquired) {
+				reacquiredTarget = reacquired;
 				({ clickedViaAX, focusedViaAX } = await attemptRefClick(reacquired));
 			}
 		}
+		// Reacquisition refreshes the global AX target list. During a batched action
+		// sequence, subsequent actions still refer to refs from the pre-batch state,
+		// so preserve that ref namespace until the batch returns a fresh state.
+		if (originalAxTargets) {
+			runtimeState.currentAxTargets = originalAxTargets;
+		}
 
-		if (!clickedViaAX && !focusedViaAX) {
-			throw new Error(`AX click/focus could not be completed for ${ref}.`);
+		const effectiveTarget = reacquiredTarget ?? axTarget;
+		const focusIsSufficient = focusedViaAX && (effectiveTarget.isTextInput || effectiveTarget.canFocus);
+		if (!clickedViaAX && !focusIsSufficient) {
+			if (isStrictAxMode()) {
+				strictModeBlock(`AX click/focus could not be completed for ${ref}.`);
+			}
+			const screenPoint = axCoordinateFallbackPoint(effectiveTarget);
+			const fallbackPoint = screenPointToCapturePoint(target, capture, screenPoint.x, screenPoint.y);
+			const verification = await performCoordinateClick(fallbackPoint.x, fallbackPoint.y);
+			return executionTrace(clickStrategy(), "default", {
+				axAttempted: true,
+				axSucceeded: false,
+				fallbackUsed: true,
+				nonStealthReason: delivery === "pid" ? "ax_ref_click_fell_back_to_pid_routed_mouse_click" : "ax_ref_click_fell_back_to_coordinate_mouse_click",
+				grounding: "ax",
+				delivery,
+				deliveryPolicy,
+				coordinateStateChanged: verification.stateChanged,
+				coordinateVerification: verification.verification,
+			});
 		}
 
 		return executionTrace(clickedViaAX ? "ax_press" : "ax_focus", "stealth", {
 			axAttempted: true,
 			axSucceeded: true,
 			fallbackUsed: false,
+			grounding: "ax",
+			delivery: "ax",
 		});
 	}
 
@@ -2391,7 +2816,6 @@ async function dispatchClick(
 	ensurePointIsInCapture(x, y, capture);
 
 	let clickedViaAX = false;
-	let focusedViaAX = false;
 	const canTryAX = button === "left" && clickCount === 1;
 	if (canTryAX) {
 		try {
@@ -2411,56 +2835,36 @@ async function dispatchClick(
 			clickedViaAX = false;
 		}
 
-		if (!clickedViaAX) {
-			try {
-				const focusResult = await bridgeCommand<AxFocusResult>(
-					"axFocusAtPoint",
-					{
-						...nativeWindowRequest(target),
-						x,
-						y,
-						captureWidth: capture.width,
-						captureHeight: capture.height,
-					},
-					{ signal, timeoutMs: COMMAND_TIMEOUT_MS },
-				);
-				focusedViaAX = toBoolean(focusResult?.focused);
-			} catch {
-				focusedViaAX = false;
-			}
-		}
 	}
 
-	if (!clickedViaAX && !focusedViaAX) {
+	let coordinateVerification: CoordinateClickVerification | undefined;
+	if (!clickedViaAX) {
 		if (isStrictAxMode()) {
-			strictModeBlock(`AX click/focus could not be completed at (${Math.round(x)},${Math.round(y)}).`);
+			strictModeBlock(`AX click could not be completed at (${Math.round(x)},${Math.round(y)}).`);
 		}
-		await bridgeCommand(
-			"mouseClick",
-			{
-				...nativeWindowRequest(target),
-				x,
-				y,
-				button,
-				clickCount,
-				captureWidth: capture.width,
-				captureHeight: capture.height,
-			},
-			{ signal, timeoutMs: COMMAND_TIMEOUT_MS },
-		);
+		coordinateVerification = await performCoordinateClick(x, y);
 	}
 
-	const usedAxPath = clickedViaAX || focusedViaAX;
+	const usedAxPath = clickedViaAX;
 	return executionTrace(
-		clickedViaAX ? "ax_press" : focusedViaAX ? "ax_focus" : clickCount > 1 ? "coordinate_event_double_click" : "coordinate_event_click",
+		clickedViaAX ? "ax_press" : clickStrategy(),
 		usedAxPath ? "stealth" : "default",
 		{
 			axAttempted: canTryAX,
 			axSucceeded: usedAxPath,
 			fallbackUsed: canTryAX && !usedAxPath,
-			nonStealthReason: usedAxPath ? undefined : "coordinate_mouse_click_requires_pointer_event",
+			nonStealthReason: usedAxPath ? undefined : nonStealthReason,
+			grounding: usedAxPath ? "ax" : "vision",
+			delivery: usedAxPath ? "ax" : delivery,
+			deliveryPolicy: usedAxPath ? undefined : deliveryPolicy,
+			coordinateStateChanged: coordinateVerification?.stateChanged,
+			coordinateVerification: coordinateVerification?.verification,
 		},
 	);
+}
+
+async function postKeyboardText(text: string, target: ResolvedTarget, delivery: NativeInputDelivery = nativeInputDelivery(), signal?: AbortSignal): Promise<void> {
+	await bridgeCommand("typeText", { text, pid: target.pid, delivery }, { signal, timeoutMs: Math.min(90_000, Math.max(COMMAND_TIMEOUT_MS, text.length * 25 + 4_000)) });
 }
 
 async function dispatchTypeText(text: string, target: ResolvedTarget, signal?: AbortSignal): Promise<ExecutionTrace> {
@@ -2479,16 +2883,15 @@ async function dispatchTypeText(text: string, target: ResolvedTarget, signal?: A
 		strictModeBlock("Raw text insertion is not AX-only. Use set_text for AX value replacement.");
 	}
 	await focusControlledWindow(target, signal);
-	await bridgeCommand(
-		"typeText",
-		{ text, pid: target.pid },
-		{ signal, timeoutMs: Math.min(90_000, Math.max(COMMAND_TIMEOUT_MS, text.length * 25 + 4_000)) },
-	);
-	return executionTrace("raw_key_text", "default", {
+	const delivery = nativeInputDelivery();
+	await postKeyboardText(text, target, delivery, signal);
+	return executionTrace(delivery === "pid" ? "pid_key_text" : "raw_key_text", "default", {
 		axAttempted: false,
 		axSucceeded: false,
 		fallbackUsed: false,
-		nonStealthReason: "raw_text_insertion_requires_keyboard_focus",
+		delivery,
+		deliveryPolicy: currentDeliveryPolicy(),
+		nonStealthReason: delivery === "pid" ? "pid_routed_text_input" : "raw_text_insertion_requires_keyboard_focus",
 	});
 }
 
@@ -2527,6 +2930,52 @@ async function focusAxElement(elementRef: string, target: ResolvedTarget, signal
 
 async function dispatchSetText(params: SetTextParams, target: ResolvedTarget, signal?: AbortSignal): Promise<ExecutionTrace> {
 	const ref = trimOrUndefined(params.ref);
+	const method = params.method === "keyboard" ? "keyboard" : "ax";
+	if (method === "keyboard") {
+		if (isStrictAxMode()) {
+			strictModeBlock("Keyboard text replacement is not AX-only. Use default set_text AX semantics in strict mode.");
+		}
+		const delivery = nativeInputDelivery();
+		let keyboardTextElementRef: string | undefined;
+		if (ref) {
+			let axTarget = axTargetByRef(ref);
+			const capture = runtimeState.currentCapture;
+			if (capture) {
+				const screenPoint = axCoordinateFallbackPoint(axTarget);
+				const point = screenPointToCapturePoint(target, capture, screenPoint.x, screenPoint.y);
+				await mouseClickAtCapturePoint(target, capture, point.x, point.y, "left", 1, delivery, signal);
+				await sleep(60, signal);
+			}
+			let focused = await focusAxElement(axTarget.elementRef, target, signal);
+			if (!focused) {
+				const reacquired = await reacquireAxTarget(axTarget, target, signal);
+				if (reacquired) {
+					axTarget = reacquired;
+					focused = await focusAxElement(axTarget.elementRef, target, signal);
+				}
+			}
+			if (!focused) {
+				throw new Error(`Could not focus AX target '${ref}' for keyboard text replacement.`);
+			}
+			keyboardTextElementRef = axTarget.elementRef;
+		} else {
+			await focusControlledWindow(target, signal);
+		}
+		if (keyboardTextElementRef) {
+			await bridgeCommand("selectText", { elementRef: keyboardTextElementRef }, { signal, timeoutMs: COMMAND_TIMEOUT_MS }).catch(() => undefined);
+			await sleep(60, signal);
+		}
+		await postKeyboardText(params.text, target, delivery, signal);
+		return executionTrace(delivery === "pid" ? "pid_key_text" : "raw_key_text", "default", {
+			axAttempted: Boolean(ref),
+			axSucceeded: Boolean(ref),
+			fallbackUsed: false,
+			delivery,
+			deliveryPolicy: currentDeliveryPolicy(),
+			nonStealthReason: delivery === "pid" ? "keyboard_text_replacement_uses_pid_routed_key_events" : "keyboard_text_replacement_requires_foreground_key_events",
+		});
+	}
+
 	if (ref) {
 		let axTarget = axTargetByRef(ref);
 		if (axTarget.canSetValue !== false) {
@@ -2719,13 +3168,16 @@ async function dispatchKeypress(params: KeypressParams, target: ResolvedTarget, 
 	if (isStrictAxMode()) {
 		strictModeBlock("Keypress is not AX-only and no semantic AX equivalent was available.");
 	}
-	await focusControlledWindow(target, signal);
-	await bridgeCommand("keyPress", { keys, pid: target.pid }, { signal, timeoutMs: COMMAND_TIMEOUT_MS });
-	return executionTrace("raw_keypress", "default", {
+	const delivery = nativeInputDelivery();
+	if (delivery === "hid") await focusControlledWindow(target, signal);
+	await bridgeCommand("keyPress", { keys, pid: target.pid, delivery }, { signal, timeoutMs: COMMAND_TIMEOUT_MS });
+	return executionTrace(delivery === "pid" ? "pid_keypress" : "raw_keypress", "default", {
 		axAttempted: semanticActionsForKeys(keys).length > 0,
 		axSucceeded: false,
 		fallbackUsed: semanticActionsForKeys(keys).length > 0,
-		nonStealthReason: "keypress_requires_keyboard_focus",
+		delivery,
+		deliveryPolicy: currentDeliveryPolicy(),
+		nonStealthReason: delivery === "pid" ? "pid_routed_keypress" : "keypress_requires_keyboard_focus",
 	});
 }
 
@@ -2817,6 +3269,7 @@ async function dispatchScroll(
 		throw new Error(`Coordinate scroll fallback requires x and y.${reasonText} Provide coordinates from the latest screenshot or use a current AX scroll target.`);
 	}
 	ensurePointIsInCapture(x, y, capture);
+	const delivery = nativeInputDelivery();
 	await bridgeCommand(
 		"scrollWheel",
 		{
@@ -2827,14 +3280,17 @@ async function dispatchScroll(
 			scrollY,
 			captureWidth: capture.width,
 			captureHeight: capture.height,
+			delivery,
 		},
 		{ signal, timeoutMs: COMMAND_TIMEOUT_MS },
 	);
-	return executionTrace("coordinate_event_scroll", "default", {
+	return executionTrace(delivery === "pid" ? "pid_event_scroll" : "coordinate_event_scroll", "default", {
 		axAttempted: true,
 		axSucceeded: false,
 		fallbackUsed: true,
-		nonStealthReason: "coordinate_scroll_requires_pointer_event",
+		delivery,
+		deliveryPolicy: currentDeliveryPolicy(),
+		nonStealthReason: delivery === "pid" ? "pid_routed_scroll" : "coordinate_scroll_requires_pointer_event",
 	});
 }
 
@@ -2850,16 +3306,19 @@ async function dispatchMoveMouse(
 	const x = toFiniteNumber(params.x, NaN);
 	const y = toFiniteNumber(params.y, NaN);
 	ensurePointIsInCapture(x, y, capture);
+	const delivery = nativeInputDelivery();
 	await bridgeCommand(
 		"mouseMove",
-		{ ...nativeWindowRequest(target), x, y, captureWidth: capture.width, captureHeight: capture.height },
+		{ ...nativeWindowRequest(target), x, y, captureWidth: capture.width, captureHeight: capture.height, delivery },
 		{ signal, timeoutMs: COMMAND_TIMEOUT_MS },
 	);
-	return executionTrace("coordinate_event_move", "default", {
+	return executionTrace(delivery === "pid" ? "pid_event_move" : "coordinate_event_move", "default", {
 		axAttempted: false,
 		axSucceeded: false,
 		fallbackUsed: false,
-		nonStealthReason: "mouse_move_requires_cursor_control",
+		delivery,
+		deliveryPolicy: currentDeliveryPolicy(),
+		nonStealthReason: delivery === "pid" ? "pid_routed_mouse_move" : "mouse_move_requires_cursor_control",
 	});
 }
 
@@ -2919,16 +3378,19 @@ async function dispatchDrag(
 	if (!path) {
 		throw new Error("drag requires path points for pointer fallback or a ref plus path for AX adjustment.");
 	}
+	const delivery = nativeInputDelivery();
 	await bridgeCommand(
 		"mouseDrag",
-		{ ...nativeWindowRequest(target), path, captureWidth: capture.width, captureHeight: capture.height },
+		{ ...nativeWindowRequest(target), path, captureWidth: capture.width, captureHeight: capture.height, delivery },
 		{ signal, timeoutMs: COMMAND_TIMEOUT_MS },
 	);
-	return executionTrace("coordinate_event_drag", "default", {
+	return executionTrace(delivery === "pid" ? "pid_event_drag" : "coordinate_event_drag", "default", {
 		axAttempted: Boolean(ref),
 		axSucceeded: false,
 		fallbackUsed: Boolean(ref),
-		nonStealthReason: "drag_requires_pointer_event",
+		delivery,
+		deliveryPolicy: currentDeliveryPolicy(),
+		nonStealthReason: delivery === "pid" ? "pid_routed_drag" : "drag_requires_pointer_event",
 	});
 }
 
@@ -2996,11 +3458,13 @@ async function performListApps(signal?: AbortSignal): Promise<AgentToolResult<Li
 			browserUseAllowed: config.browser_use || !isBrowserApp(app.appName, app.bundleId),
 		})),
 		config,
+		helper: runtimeState.helperDiagnostics,
 	};
 	const lines = details.apps.map(formatAppLine);
+	const helperLine = details.helper ? `Helper protocol ${details.helper.protocolVersion}, pid ${details.helper.pid}, macOS ${details.helper.macOS ?? "unknown"}.\n` : "";
 	const text = lines.length
-		? `Found ${lines.length} running app${lines.length === 1 ? "" : "s"}. Use list_windows with app, bundleId, or pid to inspect target windows.\n${lines.join("\n")}`
-		: "No running apps were available to pi-computer-use.";
+		? `${helperLine}Found ${lines.length} running app${lines.length === 1 ? "" : "s"}. Use list_windows with app, bundleId, or pid to inspect target windows.\n${lines.join("\n")}`
+		: `${helperLine}No running apps were available to pi-computer-use.`;
 	return { content: [{ type: "text", text }], details };
 }
 
@@ -3025,6 +3489,10 @@ async function collectWindowDetails(apps: HelperApp[], config: ReturnType<typeof
 				isOnscreen: window.isOnscreen,
 				isMain: window.isMain,
 				isFocused: window.isFocused,
+				isModal: window.isModal,
+				sheetCount: window.sheetCount,
+				role: window.role,
+				subrole: window.subrole,
 				browserUseAllowed: config.browser_use || !isBrowserApp(app.appName, app.bundleId),
 				score: scoreWindow(window),
 			});
@@ -3745,6 +4213,8 @@ async function performComputerActions(params: ComputerActionsParams, signal?: Ab
 		let axSucceeded = false;
 		let fallbackUsed = false;
 		let stealthCompatible = true;
+		let coordinateStateChanged = false;
+		let coordinateVerification: ExecutionTrace["coordinateVerification"] | undefined;
 		const nonStealthReasons = new Set<string>();
 		const actionTraces: BatchActionTrace[] = [];
 
@@ -3782,6 +4252,11 @@ async function performComputerActions(params: ComputerActionsParams, signal?: Ab
 				variant: trace.variant,
 				stealthCompatible: trace.stealthCompatible,
 				nonStealthReason: trace.nonStealthReason,
+				grounding: trace.grounding,
+				delivery: trace.delivery,
+				deliveryPolicy: trace.deliveryPolicy,
+				coordinateStateChanged: trace.coordinateStateChanged,
+				coordinateVerification: trace.coordinateVerification,
 			});
 			if (actionMayChangeState(action)) {
 				stateMayHaveChanged = true;
@@ -3789,6 +4264,8 @@ async function performComputerActions(params: ComputerActionsParams, signal?: Ab
 			axAttempted ||= trace.axAttempted === true;
 			axSucceeded ||= trace.axSucceeded === true;
 			fallbackUsed ||= trace.fallbackUsed === true;
+			coordinateStateChanged ||= trace.coordinateStateChanged === true;
+			coordinateVerification = trace.coordinateVerification ?? coordinateVerification;
 			stealthCompatible &&= trace.stealthCompatible === true;
 			if (trace.nonStealthReason) {
 				nonStealthReasons.add(trace.nonStealthReason);
@@ -3805,6 +4282,8 @@ async function performComputerActions(params: ComputerActionsParams, signal?: Ab
 			axAttempted,
 			axSucceeded,
 			fallbackUsed,
+			coordinateStateChanged: coordinateVerification ? coordinateStateChanged : undefined,
+			coordinateVerification,
 			nonStealthReason: nonStealthReasons.size > 0 ? [...nonStealthReasons].join(",") : undefined,
 		});
 		await sleep(settleMsForExecution(execution), signal);
