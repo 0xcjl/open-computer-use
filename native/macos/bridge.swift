@@ -1096,7 +1096,7 @@ final class Bridge {
 			let isMain = boolAttribute(window, attribute: kAXMainAttribute as CFString) ?? false
 			let isFocused = boolAttribute(window, attribute: kAXFocusedAttribute as CFString) ?? false
 			let isModal = boolAttribute(window, attribute: "AXModal" as CFString) ?? false
-			let sheetCount = axElementArray(window, attribute: "AXSheets" as CFString).count
+			let sheetCount = sheetElements(of: window).count
 			let scale = displayScaleFactor(for: effectiveFrame)
 
 			var item: [String: Any] = [
@@ -1127,7 +1127,7 @@ final class Bridge {
 			}
 			output.append(item)
 
-			for sheet in axElementArray(window, attribute: "AXSheets" as CFString) {
+			for sheet in sheetElements(of: window) {
 				let sheetRef = refStore.storeWindow(sheet)
 				let sheetFrame = frameForWindow(sheet)
 				output.append([
@@ -1238,7 +1238,7 @@ final class Bridge {
 				"scaleFactor": scale,
 				"pairing": ["confidence": pairing.confidence, "score": pairing.score],
 				"isModal": boolAttribute(window, attribute: "AXModal" as CFString) ?? false,
-				"sheetCount": axElementArray(window, attribute: "AXSheets" as CFString).count,
+				"sheetCount": sheetElements(of: window).count,
 				"role": role,
 				"subrole": subrole,
 			],
@@ -1535,7 +1535,7 @@ final class Bridge {
 		var preflightCapsUnknown = false
 		let beforeRootSnapshot = rootMetadataSnapshot(pid: pid)
 		let beforeFrontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-		let beforeSheetCount = windowElement(pid: pid, windowId: record.windowId).map { axElementArray($0, attribute: "AXSheets" as CFString).count } ?? 0
+		let beforeSheetCount = windowElement(pid: pid, windowId: record.windowId).map { sheetElements(of: $0).count } ?? 0
 		let beforeFocusedWindow = focusedWindowSummary(pid: pid)
 		let beforeValue: String?
 		let beforeSelected: String?
@@ -1664,7 +1664,7 @@ final class Bridge {
 			try executeCoordinates(coordinatePoint())
 		}
 
-		let afterSheetCount = windowElement(pid: pid, windowId: record.windowId).map { axElementArray($0, attribute: "AXSheets" as CFString).count } ?? beforeSheetCount
+		let afterSheetCount = windowElement(pid: pid, windowId: record.windowId).map { sheetElements(of: $0).count } ?? beforeSheetCount
 		let windowChanged = beforeFocusedWindow != focusedWindowSummary(pid: pid) || beforeSheetCount != afterSheetCount
 		var outcome = preflightCapsUnknown ? "unknown" : "unknown"
 		var evidence: [String: Any] = [:]
@@ -1733,7 +1733,14 @@ final class Bridge {
 
 	private func attachRootDelta(to response: [String: Any], before: [String: [String: Any]], beforeFrontmostPid: pid_t?, pid: Int32) -> [String: Any] {
 		var output = response
-		let delta = rootDelta(before: before, beforeFrontmostPid: beforeFrontmostPid, pid: pid)
+		// Sheets and menus take ~150-300ms to register in AX after the action
+		// returns; an immediate diff race-loses. Retry briefly before deciding
+		// nothing changed.
+		var delta = rootDelta(before: before, beforeFrontmostPid: beforeFrontmostPid, pid: pid)
+		for _ in 0..<2 where delta.isEmpty {
+			usleep(120_000)
+			delta = rootDelta(before: before, beforeFrontmostPid: beforeFrontmostPid, pid: pid)
+		}
 		if !delta.isEmpty { output["rootDelta"] = delta }
 		return output
 	}
@@ -2217,6 +2224,18 @@ final class Bridge {
 	private func displayValue(_ element: AXUIElement, role: String, subrole: String) -> String {
 		if isSecureTextElement(role: role, subrole: subrole) { return "" }
 		return stringAttribute(element, attribute: kAXValueAttribute as CFString) ?? ""
+	}
+
+	// kAXSheetsAttribute is unsupported (-25205) on recent macOS; sheets are
+	// exposed only as AXSheet-role children. Merge both sources so sheet
+	// discovery works across versions.
+	private func sheetElements(of window: AXUIElement) -> [AXUIElement] {
+		var sheets = axElementArray(window, attribute: "AXSheets" as CFString)
+		for child in axElementArray(window, attribute: kAXChildrenAttribute as CFString) {
+			guard (stringAttribute(child, attribute: kAXRoleAttribute as CFString) ?? "") == "AXSheet" else { continue }
+			if !sheets.contains(where: { CFEqual($0, child) }) { sheets.append(child) }
+		}
+		return sheets
 	}
 
 	private func axElementArray(_ element: AXUIElement, attribute: CFString) -> [AXUIElement] {

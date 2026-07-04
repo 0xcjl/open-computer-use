@@ -1853,6 +1853,13 @@ async function performSnapshot(params: SnapshotParams, signal?: AbortSignal): Pr
 	return { content: [{ type: "text", text: `Captured desktop context ${contextId}${scope}. ${result.outline.nodes.length} outline node${result.outline.nodes.length === 1 ? "" : "s"}.\n${folded.text}` }], details };
 }
 
+function sameRootIdentity(a: CurrentTarget, b: CurrentTarget): boolean {
+	if (a.pid !== b.pid) return false;
+	if (a.windowId > 0 && b.windowId > 0) return a.windowId === b.windowId;
+	if (a.nativeWindowRef && b.nativeWindowRef) return a.nativeWindowRef === b.nativeWindowRef;
+	return normalizeText(a.windowTitle) === normalizeText(b.windowTitle);
+}
+
 /** Side effects: captures/updates current target, capture state, look, and parsed outline. */
 async function performObserve(params: ObserveParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails>> {
 	const mode = params.mode ?? "fused";
@@ -1868,7 +1875,10 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 		? await resolveTargetByWindowSelector((params.root ?? params.window)!, signal)
 		: await resolveTargetForObserve(selection, signal);
 	const captureResult = await captureCurrentTarget(signal, readText, normalizeImageMode(image) === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION);
-	if (!matchesObserveSelection(captureResult.target, selection)) {
+	// Model @r refs are re-minted on re-resolution, so ref string equality
+	// alone false-positives as drift for the same root; compare stable
+	// identity against the resolved request too.
+	if (!matchesObserveSelection(captureResult.target, selection) && !sameRootIdentity(captureResult.target, requestedTarget)) {
 		throw new Error(
 			`Observation target drifted from the requested selection. Requested ${requestedTarget.appName} — ${requestedTarget.windowTitle}, captured ${captureResult.target.appName} — ${captureResult.target.windowTitle}. Call observe again or specify a more exact window title.`,
 		);

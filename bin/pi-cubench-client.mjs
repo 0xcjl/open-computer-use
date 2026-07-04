@@ -41,10 +41,18 @@ try {
 
 	let button = await searchFirst({ text: "Rename Selected File" }) ?? await searchFirst({ text: "Rename" }) ?? await searchFirst({ text: "Apply" });
 	if (!button) throw new Error("Could not find rename/apply button");
-	await act({ action: "click", ref: button.ref });
+	const renameResult = await act({ action: "click", ref: button.ref });
 
-	const modal = await searchFirst({ text: "Confirm" }) ?? await searchFirst({ text: "Replace" }) ?? await searchFirst({ text: "OK" });
-	if (modal) await act({ action: "click", ref: modal.ref });
+	// The confirm-modal variant raises a sheet; the act's root delta is how
+	// the agent learns about it. Observe the new root before searching it.
+	const appeared = renameResult.details?.execution?.rootDelta?.find((delta) => delta.change === "appeared");
+	if (appeared) {
+		observations += 1;
+		await tool(executeObserve, { root: appeared.ref, mode: "fused", image: "never" });
+		const modal = await searchFirst({ text: "Confirm" }) ?? await searchFirst({ text: "Replace" }) ?? await searchFirst({ text: "OK" }) ?? await searchFirst({ role: "AXButton" });
+		if (!modal) throw new Error(`A root appeared (${appeared.kind} ${appeared.title ?? ""}) but no confirm control was found in it.`);
+		await act({ action: "click", ref: modal.ref });
+	}
 
 	await waitFor({ text: "paid_invoice_123.pdf", timeoutMs: 5_000 }).catch(() => undefined);
 	console.log(JSON.stringify(result("completed", "Done")));
