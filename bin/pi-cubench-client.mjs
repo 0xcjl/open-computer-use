@@ -1,6 +1,7 @@
 #!/usr/bin/env -S node --experimental-transform-types
 import {
 	executeAct,
+	executeFind,
 	executeObserve,
 	executeSearchUi,
 	executeWaitFor,
@@ -54,9 +55,13 @@ try {
 
 async function observe() {
 	observations += 1;
+	const app = input.target?.appName ?? "Cubench";
+	const roots = await tool(executeFind, { app, kind: "window" });
+	const root = roots.details?.windows?.[0]?.windowRef;
 	return await tool(executeObserve, {
-		app: input.target?.appName ?? "Cubench",
+		app,
 		windowTitle: input.target?.windowTitle,
+		root,
 		mode: "fused",
 		image: "auto",
 	});

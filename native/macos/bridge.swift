@@ -330,7 +330,7 @@ final class InputSuppressionGuard {
 }
 
 final class Bridge {
-	private let protocolVersion = 3
+	private let protocolVersion = 4
 	private let refStore = AXRefStore()
 	private let inputSuppressionGuard = InputSuppressionGuard()
 	private let browserBundleIds: Set<String> = [
@@ -515,6 +515,8 @@ final class Bridge {
 			return listApps()
 		case "listWindows":
 			return try listWindows(pid: Int32(try intArg(request, "pid")))
+		case "listRoots":
+			return try listRoots(pid: optionalIntArg(request, "pid").map { Int32($0) })
 		case "getFrontmost":
 			return try getFrontmost()
 		case "getUserContext":
@@ -1006,6 +1008,32 @@ final class Bridge {
 		return score
 	}
 
+	private func rootKind(role: String, subrole: String) -> String {
+		if role == "AXSheet" { return "sheet" }
+		if subrole.localizedCaseInsensitiveContains("popover") { return "popover" }
+		if subrole.localizedCaseInsensitiveContains("dialog") || role == "AXDialog" { return "dialog" }
+		return "window"
+	}
+
+	private func listRoots(pid: Int32?) throws -> [String: Any] {
+		let apps = pid.map { [["pid": Int($0)]] } ?? listApps()
+		var roots: [[String: Any]] = []
+		for app in apps {
+			guard let rawPid = app["pid"] as? Int else { continue }
+			let appPid = Int32(rawPid)
+			let appName = app["appName"] as? String ?? processName(pid: appPid) ?? "Unknown App"
+			let bundleId = app["bundleId"] as? String
+			for var root in (try? listWindows(pid: appPid)) ?? [] {
+				root["pid"] = rawPid
+				root["appName"] = appName
+				if let bundleId { root["bundleId"] = bundleId }
+				roots.append(root)
+			}
+		}
+		roots.sort { (($0["zOrder"] as? Int) ?? Int.max) < (($1["zOrder"] as? Int) ?? Int.max) }
+		return ["roots": roots]
+	}
+
 	private func listWindows(pid: Int32) throws -> [[String: Any]] {
 		ensureEnhancedAccessibility(pid: pid)
 		let appElement = AXUIElementCreateApplication(pid)
@@ -1015,7 +1043,7 @@ final class Bridge {
 		let pairings = windowPairings(windows: windows, candidates: candidates)
 
 		var output: [[String: Any]] = []
-		for window in windows {
+		for (zIndex, window) in windows.enumerated() {
 			let axTitle = stringAttribute(window, attribute: kAXTitleAttribute as CFString) ?? ""
 			let axRole = stringAttribute(window, attribute: kAXRoleAttribute as CFString) ?? ""
 			let axSubrole = stringAttribute(window, attribute: kAXSubroleAttribute as CFString) ?? ""
@@ -1036,7 +1064,10 @@ final class Bridge {
 			let scale = displayScaleFactor(for: effectiveFrame)
 
 			var item: [String: Any] = [
+				"kind": rootKind(role: axRole, subrole: axSubrole),
+				"rootRef": windowRef,
 				"windowRef": windowRef,
+				"zOrder": zIndex,
 				"title": title,
 				"role": axRole,
 				"subrole": axSubrole,
@@ -1059,12 +1090,35 @@ final class Bridge {
 				item["windowId"] = Int(candidate.windowId)
 			}
 			output.append(item)
+
+			for sheet in axElementArray(window, attribute: "AXSheets" as CFString) {
+				let sheetRef = refStore.storeWindow(sheet)
+				let sheetFrame = frameForWindow(sheet)
+				output.append([
+					"kind": "sheet",
+					"rootRef": sheetRef,
+					"windowRef": sheetRef,
+					"zOrder": zIndex,
+					"title": stringAttribute(sheet, attribute: kAXTitleAttribute as CFString) ?? title,
+					"role": stringAttribute(sheet, attribute: kAXRoleAttribute as CFString) ?? "AXSheet",
+					"subrole": stringAttribute(sheet, attribute: kAXSubroleAttribute as CFString) ?? "",
+					"isModal": true,
+					"framePoints": ["x": sheetFrame.origin.x, "y": sheetFrame.origin.y, "w": sheetFrame.width, "h": sheetFrame.height],
+					"scaleFactor": displayScaleFactor(for: sheetFrame),
+					"isMinimized": false,
+					"isOnscreen": true,
+					"isMain": false,
+					"isFocused": isFocused,
+					"pairing": ["confidence": "low", "score": 0],
+				])
+			}
 		}
 		return output
 	}
 
 	private func look(_ request: [String: Any]) throws -> [String: Any] {
-		let windowId = UInt32(try intArg(request, "windowId"))
+		let windowId = optionalIntArg(request, "windowId").map { UInt32($0) }
+		let windowRef = optionalStringArg(request, "windowRef")
 		let maxDimension = optionalIntArg(request, "maxDimension").map { max(1, $0) }
 		let readText = optionalStringArg(request, "readText") ?? "auto"
 		guard readText == "auto" || readText == "always" || readText == "never" else {
@@ -1072,47 +1126,67 @@ final class Bridge {
 		}
 
 		let captureStart = Date()
-		let capture = try captureWindow(windowId: windowId)
-		let captureMs = elapsedMs(captureStart)
+		let capture = try windowId.map { try captureWindow(windowId: $0) }
+		let captureMs = capture.map { _ in elapsedMs(captureStart) } ?? 0
 
-		guard let pid = pidForWindowId(windowId) else {
-			throw BridgeFailure(message: "Window \(windowId) is not owned by a running app", code: "window_not_found")
+		let pid: Int32
+		if let windowId, let ownerPid = pidForWindowId(windowId) {
+			pid = ownerPid
+		} else if let windowRef, let element = refStore.element(for: windowRef), let owner = pidForElement(element) {
+			pid = owner
+		} else {
+			throw BridgeFailure(message: "Root is not owned by a running app", code: "root_not_found")
 		}
 		ensureEnhancedAccessibility(pid: pid)
-		guard let window = windowElement(pid: pid, windowId: windowId) else {
-			throw BridgeFailure(message: "Window \(windowId) is not available through Accessibility", code: "window_not_found")
+		guard let window = windowElement(pid: pid, windowId: windowId, windowRef: windowRef) else {
+			throw BridgeFailure(message: "Root is not available through Accessibility", code: "root_not_found")
 		}
 		let rootElement: AXUIElement
 		if let scopeRef = optionalStringArg(request, "scopeRef") {
 			guard let scoped = refStore.element(for: scopeRef), isElement(scoped, descendantOf: window) else {
-				throw BridgeFailure(message: "Scope ref is stale or outside the target window", code: "element_ref_invalid")
+				throw BridgeFailure(message: "Scope ref is stale or outside the target root", code: "element_ref_invalid")
 			}
 			rootElement = scoped
 		} else {
 			rootElement = window
 		}
 
-		let outputImage = downscaledImage(capture.image, maxDimension: maxDimension) ?? capture.image
-		let transform = rectTransform(windowFrame: capture.frame, imageWidth: outputImage.width, imageHeight: outputImage.height)
+		let rootFrame = frameForWindow(window)
+		let imageWidth: Int
+		let imageHeight: Int
+		let imagePayload: [String: Any]
+		let transform: (CGRect) -> CGRect
+		if let capture {
+			let outputImage = downscaledImage(capture.image, maxDimension: maxDimension) ?? capture.image
+			imageWidth = outputImage.width
+			imageHeight = outputImage.height
+			transform = rectTransform(windowFrame: capture.frame, imageWidth: outputImage.width, imageHeight: outputImage.height)
+			guard let jpeg = jpegData(image: outputImage, quality: 0.8) else {
+				throw BridgeFailure(message: "Failed to encode look image as JPEG", code: "encoding_failed")
+			}
+			imagePayload = ["jpegBase64": jpeg.base64EncodedString(), "width": outputImage.width, "height": outputImage.height]
+		} else {
+			imageWidth = max(1, Int(rootFrame.width))
+			imageHeight = max(1, Int(rootFrame.height))
+			imagePayload = ["jpegBase64": "", "width": imageWidth, "height": imageHeight]
+			transform = rectTransform(windowFrame: rootFrame, imageWidth: imageWidth, imageHeight: imageHeight)
+		}
 		let describeStart = Date()
 		let outline = buildLookOutline(root: rootElement, transform: transform)
 		let describeMs = elapsedMs(describeStart)
 
 		var readTextMs = 0
-		if readText == "always" || (readText == "auto" && sparseDescription(outline, imageWidth: outputImage.width, imageHeight: outputImage.height)) {
+		if let capture, readText == "always" || (readText == "auto" && sparseDescription(outline, imageWidth: imageWidth, imageHeight: imageHeight)) {
 			let textStart = Date()
-			let boxes = try recognizeText(in: capture.image, outputWidth: outputImage.width, outputHeight: outputImage.height)
+			let boxes = try recognizeText(in: capture.image, outputWidth: imageWidth, outputHeight: imageHeight)
 			attachOCR(boxes, to: outline)
 			readTextMs = elapsedMs(textStart)
 		}
 
-		guard let jpeg = jpegData(image: outputImage, quality: 0.8) else {
-			throw BridgeFailure(message: "Failed to encode look image as JPEG", code: "encoding_failed")
-		}
 		nextLookId += 1
 		let lookId = "look_\(nextLookId)"
-		storeLookRecord(LookRecord(lookId: lookId, windowId: windowId, windowFrame: capture.frame, imageWidth: outputImage.width, imageHeight: outputImage.height))
-		let scale = capture.frame.width > 0 ? Double(outputImage.width) / capture.frame.width : displayScaleFactor(for: capture.frame)
+		storeLookRecord(LookRecord(lookId: lookId, windowId: windowId ?? 0, windowFrame: capture?.frame ?? rootFrame, imageWidth: imageWidth, imageHeight: imageHeight))
+		let scale = (capture?.frame.width ?? rootFrame.width) > 0 ? Double(imageWidth) / (capture?.frame.width ?? rootFrame.width) : displayScaleFactor(for: rootFrame)
 		let pairing = pairingForWindow(window, pid: pid)
 		let role = stringAttribute(window, attribute: kAXRoleAttribute as CFString) ?? ""
 		let subrole = stringAttribute(window, attribute: kAXSubroleAttribute as CFString) ?? ""
@@ -1120,8 +1194,9 @@ final class Bridge {
 			"lookId": lookId,
 			"capturedAt": captureStart.timeIntervalSince1970,
 			"window": [
-				"windowId": Int(windowId),
-				"framePoints": ["x": capture.frame.origin.x, "y": capture.frame.origin.y, "w": capture.frame.width, "h": capture.frame.height],
+				"windowId": Int(windowId ?? 0),
+				"rootRef": windowRef ?? refStore.storeWindow(window),
+				"framePoints": ["x": (capture?.frame ?? rootFrame).origin.x, "y": (capture?.frame ?? rootFrame).origin.y, "w": (capture?.frame ?? rootFrame).width, "h": (capture?.frame ?? rootFrame).height],
 				"scaleFactor": scale,
 				"pairing": ["confidence": pairing.confidence, "score": pairing.score],
 				"isModal": boolAttribute(window, attribute: "AXModal" as CFString) ?? false,
@@ -1129,7 +1204,7 @@ final class Bridge {
 				"role": role,
 				"subrole": subrole,
 			],
-			"image": ["jpegBase64": jpeg.base64EncodedString(), "width": outputImage.width, "height": outputImage.height],
+			"image": imagePayload,
 			"outline": outline.payload(),
 			"timings": ["captureMs": captureMs, "describeMs": describeMs, "readTextMs": readTextMs],
 		]

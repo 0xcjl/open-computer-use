@@ -52,8 +52,7 @@ Use `/computer-use` inside Pi to show the active configuration and where it came
 
 ## Main tools
 
-- `list_apps`
-- `list_windows`
+- `find`
 - `observe`
 - `search_ui`
 - `expand_ui`

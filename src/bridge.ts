@@ -10,12 +10,12 @@ import { cdpEvaluateForContext, cdpNavigateContext, cdpScrollForContext, cdpSnap
 import { getComputerUseConfig, isBrowserUseEnabled, isStrictAxMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
 import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, restoreOutline, searchOutline, serializeOutline, serializeOutlineNode, type LookResponse, type Outline, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode } from "./outline.ts";
-import { AGENT_TOOL_NAMES, type ActParams, type DragParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type KeypressParams, type LaunchBrowserContextParams, type ListWindowsParams, type MouseButtonName, type MoveMouseParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type ScrollParams, type SearchUiParams, type SetTextParams, type SnapshotParams, type TypeTextParams, type WaitForParams, type WaitParams, type WindowSelector, type WindowTargetParams } from "./contract.ts";
+import { AGENT_TOOL_NAMES, type ActParams, type DragParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type KeypressParams, type LaunchBrowserContextParams, type FindParams, type MouseButtonName, type MoveMouseParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type RootSelector, type ScrollParams, type SearchUiParams, type SetTextParams, type SnapshotParams, type TypeTextParams, type WaitForParams, type WaitParams, type WindowSelector, type WindowTargetParams } from "./contract.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
 import { currentPlatformBackend } from "./platform/index.ts";
-import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformActRequest, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformWindow as HelperWindow } from "./platform/types.ts";
+import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformActRequest, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformRoot as HelperWindow } from "./platform/types.ts";
 import type { PermissionStatus } from "./permissions.ts";
-export type { ActParams, DragParams, EvaluateBrowserParams, ExpandUiParams, ImageMode, InspectUiParams, KeypressParams, LaunchBrowserContextParams, ListWindowsParams, MouseButtonName, MoveMouseParams, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, ScrollParams, SearchUiParams, SetTextParams, SnapshotParams, TypeTextParams, WaitForParams, WaitParams, WindowSelector, WindowTargetParams } from "./contract.ts";
+export type { ActParams, DragParams, EvaluateBrowserParams, ExpandUiParams, ImageMode, InspectUiParams, KeypressParams, LaunchBrowserContextParams, FindParams, MouseButtonName, MoveMouseParams, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, RootSelector, ScrollParams, SearchUiParams, SetTextParams, SnapshotParams, TypeTextParams, WaitForParams, WaitParams, WindowSelector, WindowTargetParams } from "./contract.ts";
 
 interface StateTargetSnapshot {
 	pid: number;
@@ -68,6 +68,7 @@ interface ExecutionTrace {
 	performed?: HelperActPerformed;
 	evidence?: Record<string, unknown>;
 	error?: HelperActResult["error"];
+	rootDelta?: HelperActResult["rootDelta"];
 }
 
 export interface ComputerUseDetails {
@@ -119,29 +120,14 @@ export interface ComputerUseDetails {
 		| "browser_wait_verification";
 }
 
-export interface ListAppsDetails {
-	tool: "list_apps";
-	apps: Array<{
-		app: string;
-		bundleId?: string;
-		pid: number;
-		isFrontmost: boolean;
-		browserUseAllowed: boolean;
-	}>;
-	config: {
-		browser_use: boolean;
-		stealth_mode: boolean;
-	};
-	helper?: PlatformDiagnostics;
-}
-
 export interface ListWindowsDetails {
-	tool: "list_windows";
-	query: ListWindowsParams;
+	tool: "find";
+	query: FindParams;
 	windows: Array<{
 		app: string;
 		bundleId?: string;
 		pid: number;
+		kind: string;
 		windowTitle: string;
 		windowId?: number;
 		windowRef: string;
@@ -296,7 +282,7 @@ interface RuntimeState {
 	windowRefs: Map<string, WindowRefRecord>;
 	windowRefByIdentity: Map<string, string>;
 	windowWriteQueues: Map<string, Promise<void>>;
-	nextWindowRefIndex: number;
+	nextRootRefIndex: number;
 	allowNextTypeTextAxReplacement?: boolean;
 	pendingBrowserAddress?: PendingBrowserAddress;
 	managedBrowser?: ChildProcess;
@@ -336,7 +322,7 @@ const runtimeState: RuntimeState = {
 	windowRefs: new Map(),
 	windowRefByIdentity: new Map(),
 	windowWriteQueues: new Map(),
-	nextWindowRefIndex: 1,
+	nextRootRefIndex: 1,
 };
 
 function normalizeError(error: unknown): Error {
@@ -512,7 +498,7 @@ function validateStateId(stateId?: string): CurrentCapture {
 	const supplied = stateId;
 	if (supplied && runtimeState.currentCapture.stateId !== supplied) {
 		throw new Error(
-			`Stale state '${supplied}'. The latest state is '${runtimeState.currentCapture.stateId}' for ${runtimeState.currentTarget.windowRef ?? "the current window"}. Call observe${runtimeState.currentTarget.windowRef ? `({ window: "${runtimeState.currentTarget.windowRef}" })` : ""} again and retry.`,
+			`Stale state '${supplied}'. The latest state is '${runtimeState.currentCapture.stateId}' for ${runtimeState.currentTarget.windowRef ?? "the current window"}. Call observe${runtimeState.currentTarget.windowRef ? `({ root: "${runtimeState.currentTarget.windowRef}" })` : ""} again and retry.`,
 		);
 	}
 	const stateTarget = runtimeState.currentStateTarget;
@@ -544,7 +530,7 @@ function outlineNodeByRef(ref: string): OutlineNode {
 	const outline = runtimeState.currentOutline;
 	const node = outline ? nodeByRef(outline, ref) : undefined;
 	if (!node) {
-		const windowHint = runtimeState.currentTarget?.windowRef ? `({ window: "${runtimeState.currentTarget.windowRef}" })` : "";
+		const windowHint = runtimeState.currentTarget?.windowRef ? `({ root: "${runtimeState.currentTarget.windowRef}" })` : "";
 		throw new Error(`Outline ref '${ref}' is stale or not available for the latest state. Call observe${windowHint} again and choose a current @e ref.`);
 	}
 	return node;
@@ -625,10 +611,10 @@ async function listApps(signal?: AbortSignal): Promise<HelperApp[]> {
 }
 
 async function listWindows(pid: number, signal?: AbortSignal): Promise<HelperWindow[]> {
-	return await currentPlatformBackend.listWindows({ pid }, signal);
+	return await currentPlatformBackend.listRoots({ pid }, signal);
 }
 
-function appMatchesWindowQuery(app: HelperApp, query: ListWindowsParams): boolean {
+function appMatchesWindowQuery(app: HelperApp, query: FindParams): boolean {
 	const appQuery = trimOrUndefined(query.app);
 	const bundleQuery = trimOrUndefined(query.bundleId);
 	const pidQuery = Number.isFinite(query.pid) ? Math.trunc(query.pid!) : undefined;
@@ -637,13 +623,6 @@ function appMatchesWindowQuery(app: HelperApp, query: ListWindowsParams): boolea
 	if (bundleQuery && normalizeText(app.bundleId ?? "") !== normalizeText(bundleQuery)) return false;
 	if (appQuery && !normalizeText(app.appName).includes(normalizeText(appQuery))) return false;
 	return true;
-}
-
-function formatAppLine(app: ListAppsDetails["apps"][number]): string {
-	const flags = [app.isFrontmost ? "frontmost" : undefined, app.browserUseAllowed ? undefined : "browser_use_disabled"]
-		.filter(Boolean)
-		.join(", ");
-	return `- ${app.app}${app.bundleId ? ` (${app.bundleId})` : ""}, pid ${app.pid}${flags ? ` [${flags}]` : ""}`;
 }
 
 function formatWindowLine(window: ListWindowsDetails["windows"][number]): string {
@@ -707,7 +686,7 @@ function storeWindowRef(record: Omit<WindowRefRecord, "ref">): WindowRefRecord {
 		}
 	}
 
-	const ref = `@w${runtimeState.nextWindowRefIndex++}`;
+	const ref = `@r${runtimeState.nextRootRefIndex++}`;
 	const stored = { ...record, ref };
 	runtimeState.windowRefByIdentity.set(identity, ref);
 	runtimeState.windowRefs.set(ref, stored);
@@ -766,7 +745,7 @@ async function openBrowserLocationFromPendingAddress(keys: string[], target: Res
 
 function choosePreferredWindow(windows: HelperWindow[], appName: string): HelperWindow {
 	if (!windows.length) {
-		throw new Error(`No controllable window was found in app '${appName}'.`);
+		throw new Error(`No controllable root was found in app '${appName}'.`);
 	}
 
 	const scored = [...windows].sort((a, b) => scoreWindow(b) - scoreWindow(a));
@@ -912,7 +891,7 @@ function normalizeWindowSelector(selector: WindowSelector | undefined): string |
 async function resolveTargetByWindowSelector(selector: WindowSelector, signal?: AbortSignal): Promise<ResolvedTarget> {
 	const normalized = normalizeWindowSelector(selector);
 	if (!normalized) {
-		throw new Error("window target must be a non-empty @w ref or numeric windowId.");
+		throw new Error("root target must be a non-empty @r ref or numeric windowId.");
 	}
 
 	const current = runtimeState.currentTarget;
@@ -929,7 +908,7 @@ async function resolveTargetByWindowSelector(selector: WindowSelector, signal?: 
 			(fromRef.nativeWindowRef ? windows.find((window) => window.windowRef === fromRef.nativeWindowRef) : undefined) ??
 			windows.find((window) => normalizeText(window.title || "(untitled)") === normalizeText(fromRef.windowTitle));
 		if (!match) {
-			throw new Error(`Window ref '${normalized}' is stale. Call list_windows again and choose a current window.`);
+			throw new Error(`Root ref '${normalized}' is stale. Call find again and choose a current window.`);
 		}
 		const resolved = toResolvedTarget(app, match);
 		setCurrentTarget(resolved);
@@ -949,13 +928,13 @@ async function resolveTargetByWindowSelector(selector: WindowSelector, signal?: 
 				return resolved;
 			}
 		}
-		throw new Error(`Window id '${numericWindowId}' was not found. Call list_windows again and choose a current window.`);
+		throw new Error(`Window id '${numericWindowId}' was not found. Call find again and choose a current window.`);
 	}
 
-	if (normalized.startsWith("@w")) {
-		throw new Error(`Window ref '${normalized}' is not available in this session. Call list_windows first.`);
+	if (normalized.startsWith("@r")) {
+		throw new Error(`Root ref '${normalized}' is not available in this session. Call find first.`);
 	}
-	throw new Error(`Unsupported window target '${normalized}'. Use a @w ref from list_windows or a numeric windowId.`);
+	throw new Error(`Unsupported root target '${normalized}'. Use a @r ref from find or a numeric windowId.`);
 }
 
 async function selectWindowIfProvided(selector: WindowSelector | undefined, signal?: AbortSignal): Promise<void> {
@@ -1040,7 +1019,7 @@ async function resolveFrontmostTarget(signal?: AbortSignal): Promise<ResolvedTar
 
 	const windows = await listWindows(frontmost.pid, signal);
 	if (!windows.length) {
-		throw new Error("No frontmost controllable window was found. Open an app window and call observe again.");
+		throw new Error("No frontmost controllable root was found. Open an app window and call observe again.");
 	}
 
 	if (currentPlatformBackend.isBrowserApp(app.appName, app.bundleId)) {
@@ -1094,7 +1073,7 @@ async function resolveTargetForObserve(selection: ObserveTargetParams, signal?: 
 		assertBrowserUseAllowed(app);
 		let windows = await listWindows(app.pid, signal);
 		if (!windows.length) {
-			throw new Error(`No controllable window was found in app '${app.appName}'.`);
+			throw new Error(`No controllable root was found in app '${app.appName}'.`);
 		}
 
 		let window: HelperWindow;
@@ -1185,7 +1164,7 @@ function captureForLook(look: LookResponse): CurrentCapture {
 }
 
 async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; scopeRef?: string; maxDimension?: number }, signal?: AbortSignal): Promise<LookResponse> {
-	if (!Number.isFinite(target.windowId) || target.windowId <= 0) throw new Error(`Current platform requires a stable windowId to observe '${target.windowTitle}'. Call list_windows and select a window with a stable id.`);
+	if (!Number.isFinite(target.windowId) || target.windowId <= 0) throw new Error(`Current platform requires a stable windowId to observe '${target.windowTitle}'. Call find and select a window with a stable id.`);
 	return await currentPlatformBackend.observe({
 		target: nativeWindowRequest(target),
 		readText: options.readText,
@@ -1314,7 +1293,7 @@ async function buildToolResult(
 	const outlineText = `\n\nOutline (${folded.nodeCount} nodes, lookId ${result.look.lookId}${folded.truncated ? ", folded output truncated" : ""}):\n${folded.text}`;
 	const fallbackText = fallbackReason ? `\n\n${fallbackReason.message}` : "";
 	const content: AgentToolResult<ComputerUseDetails>["content"] = [{ type: "text", text: `${summary}${consoleText}${noteText}${outlineText}${fallbackText}` }];
-	if (fallbackReason) {
+	if (fallbackReason && result.look.image.jpegBase64) {
 		content.push({ type: "image", data: result.look.image.jpegBase64, mimeType: "image/jpeg" });
 	}
 
@@ -1340,6 +1319,9 @@ function currentLookOrThrow(): LookResponse {
 }
 
 function ensurePointIsInLookImage(x: number, y: number, look: LookResponse, errorPrefix = "Coordinates"): void {
+	if (!look.image.jpegBase64) {
+		throw new Error(`${errorPrefix} require an image-bearing root. This look is semantic-only; use an @e ref with a semantic action or observe a window root.`);
+	}
 	if (!Number.isFinite(x) || !Number.isFinite(y)) {
 		throw new Error(`${errorPrefix} must be finite numbers.`);
 	}
@@ -1387,6 +1369,7 @@ function executionTraceFromAct(result: HelperActResult): ExecutionTrace {
 		performed: result.performed,
 		evidence: result.evidence,
 		error: result.error,
+		rootDelta: result.rootDelta,
 		delivery: result.performed?.delivery,
 		deliveryPolicy: currentDeliveryPolicy(),
 	});
@@ -1483,30 +1466,7 @@ async function runActionTool(
 	}
 }
 
-async function performListApps(signal?: AbortSignal): Promise<AgentToolResult<ListAppsDetails>> {
-	const apps = await listApps(signal);
-	const config = getComputerUseConfig();
-	const details: ListAppsDetails = {
-		tool: "list_apps",
-		apps: apps.map((app) => ({
-			app: app.appName,
-			bundleId: app.bundleId,
-			pid: app.pid,
-			isFrontmost: app.isFrontmost === true,
-			browserUseAllowed: config.browser_use || !currentPlatformBackend.isBrowserApp(app.appName, app.bundleId),
-		})),
-		config,
-		helper: runtimeState.helperDiagnostics,
-	};
-	const lines = details.apps.map(formatAppLine);
-	const helperLine = details.helper ? `Helper protocol ${details.helper.protocolVersion}, pid ${details.helper.pid}, OS ${details.helper.os ?? "unknown"}.\n` : "";
-	const text = lines.length
-		? `${helperLine}Found ${lines.length} running app${lines.length === 1 ? "" : "s"}. Use list_windows with app, bundleId, or pid to inspect target windows.\n${lines.join("\n")}`
-		: `${helperLine}No running apps were available to pi-computer-use.`;
-	return { content: [{ type: "text", text }], details };
-}
-
-// Side effect: stores stable @w refs for discovered windows in runtimeState.
+// Side effect: stores stable @r refs for discovered windows in runtimeState.
 async function collectWindowDetails(apps: HelperApp[], config: ReturnType<typeof getComputerUseConfig>, signal?: AbortSignal): Promise<ListWindowsDetails["windows"]> {
 	const windows: ListWindowsDetails["windows"] = [];
 	for (const app of apps) {
@@ -1517,6 +1477,7 @@ async function collectWindowDetails(apps: HelperApp[], config: ReturnType<typeof
 				app: app.appName,
 				bundleId: app.bundleId,
 				pid: app.pid,
+				kind: window.kind,
 				windowTitle: window.title || "(untitled)",
 				windowId: window.windowId,
 				windowRef: storedRef.ref,
@@ -1541,27 +1502,28 @@ async function collectWindowDetails(apps: HelperApp[], config: ReturnType<typeof
 	return windows;
 }
 
-async function performListWindows(params: ListWindowsParams, signal?: AbortSignal): Promise<AgentToolResult<ListWindowsDetails>> {
+async function performListWindows(params: FindParams, signal?: AbortSignal): Promise<AgentToolResult<ListWindowsDetails>> {
 	const rawParams = params ?? {};
-	const query: ListWindowsParams = {
+	const query: FindParams = {
 		app: trimOrUndefined(rawParams.app),
 		bundleId: trimOrUndefined(rawParams.bundleId),
 		pid: Number.isFinite(rawParams.pid) ? Math.trunc(rawParams.pid!) : undefined,
+		kind: rawParams.kind,
 	};
 	const matchingApps = (await listApps(signal)).filter((app) => appMatchesWindowQuery(app, query));
 	if (matchingApps.length === 0) {
 		throw new Error(
-			`No running app matched list_windows query${query.app ? ` app='${query.app}'` : ""}${query.bundleId ? ` bundleId='${query.bundleId}'` : ""}${query.pid ? ` pid=${query.pid}` : ""}. Call list_apps to inspect running apps.`,
+			`No running app matched find query${query.app ? ` app='${query.app}'` : ""}${query.bundleId ? ` bundleId='${query.bundleId}'` : ""}${query.pid ? ` pid=${query.pid}` : ""}.`,
 		);
 	}
 
 	const config = getComputerUseConfig();
-	const windows = await collectWindowDetails(matchingApps, config, signal);
-	const details: ListWindowsDetails = { tool: "list_windows", query, windows, config };
+	const windows = (await collectWindowDetails(matchingApps, config, signal)).filter((root) => !query.kind || root.kind === query.kind);
+	const details: ListWindowsDetails = { tool: "find", query, windows, config };
 	const lines = windows.map(formatWindowLine);
 	const text = lines.length
-		? `Found ${lines.length} controllable window${lines.length === 1 ? "" : "s"}. Use the @w refs with observe({ window: "@wN" }) or action tools' optional window field.\n${lines.join("\n")}`
-		: `No controllable windows matched the query. Try opening a window, or call list_apps to confirm the app is running.`;
+		? `Found ${lines.length} controllable root${lines.length === 1 ? "" : "s"}. Use the @r refs with observe({ root: "@rN" }) or action tools' optional root field.\n${lines.join("\n")}`
+		: `No controllable roots matched the query. Try opening a window or broadening the find filters.`;
 	return { content: [{ type: "text", text }], details };
 }
 
@@ -1680,7 +1642,7 @@ async function performReadText(params: ReadTextParams, signal?: AbortSignal): Pr
 	}
 
 	const desktopWindowRef = contextId ? desktopWindowRefFromContext(contextId) : undefined;
-	await selectWindowIfProvided(params.window ?? desktopWindowRef, signal);
+	await selectWindowIfProvided((params.root ?? params.window) ?? desktopWindowRef, signal);
 	validateStateId(params.stateId);
 	if (!ref) throw new Error("read_text requires ref for desktop contexts. Call observe/inspect_ui and use a text-bearing outline ref.");
 	const node = outlineNodeByRef(ref);
@@ -1734,7 +1696,7 @@ async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Prom
 	}
 
 	const desktopWindowRef = contextId ? desktopWindowRefFromContext(contextId) : undefined;
-	await selectWindowIfProvided(params.window ?? desktopWindowRef, signal);
+	await selectWindowIfProvided((params.root ?? params.window) ?? desktopWindowRef, signal);
 	let target = await resolveCurrentTarget(signal);
 	target = await ensureTargetWindowId(target, signal);
 	const raw = await currentPlatformBackend.waitFor({
@@ -1833,10 +1795,10 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	const selection = {
 		app: trimOrUndefined(params.app),
 		windowTitle: trimOrUndefined(params.windowTitle),
-		window: normalizeWindowSelector(params.window),
+		window: normalizeWindowSelector(params.root ?? params.window),
 	};
 	const requestedTarget = selection.window
-		? await resolveTargetByWindowSelector(params.window!, signal)
+		? await resolveTargetByWindowSelector((params.root ?? params.window)!, signal)
 		: await resolveTargetForObserve(selection, signal);
 	const captureResult = await captureCurrentTarget(signal, readText, normalizeImageMode(image) === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION);
 	if (!matchesObserveSelection(captureResult.target, selection)) {
@@ -1856,7 +1818,7 @@ function currentOutlineOrThrow(stateId?: string): Outline {
 
 /** Pure outline query unless a window selector is supplied, in which case current target selection may change. */
 async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Promise<AgentToolResult<OutlineToolDetails>> {
-	await selectWindowIfProvided(params.window, signal);
+	await selectWindowIfProvided(((params as any).root ?? params.window), signal);
 	const outline = currentOutlineOrThrow(params.stateId);
 	const text = trimOrUndefined(params.text);
 	const role = trimOrUndefined(params.role);
@@ -1873,7 +1835,7 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 
 /** Reads cached outline; truncated refs trigger a scoped look. */
 async function performExpandUi(params: ExpandUiParams, signal?: AbortSignal): Promise<AgentToolResult<OutlineToolDetails>> {
-	await selectWindowIfProvided(params.window, signal);
+	await selectWindowIfProvided(((params as any).root ?? params.window), signal);
 	let outline = currentOutlineOrThrow(params.stateId);
 	const ref = trimOrUndefined(params.ref);
 	if (!ref) throw new Error("expand_ui.ref is required.");
@@ -1894,7 +1856,7 @@ async function performExpandUi(params: ExpandUiParams, signal?: AbortSignal): Pr
 
 /** Pure cached-outline inspection unless a window selector is supplied. */
 async function performInspectUi(params: InspectUiParams, signal?: AbortSignal): Promise<AgentToolResult<OutlineToolDetails>> {
-	await selectWindowIfProvided(params.window, signal);
+	await selectWindowIfProvided(((params as any).root ?? params.window), signal);
 	const outline = currentOutlineOrThrow(params.stateId);
 	const ref = trimOrUndefined(params.ref);
 	if (!ref) throw new Error("inspect_ui.ref is required.");
@@ -1947,7 +1909,7 @@ async function performHelperAct(
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<ComputerUseDetails | ConfirmationDetails>> {
 	runtimeState.currentImageMode = normalizeImageMode(params.image);
-	await selectWindowIfProvided(params.window, signal);
+	await selectWindowIfProvided(((params as any).root ?? params.window), signal);
 	validateStateId(params.stateId);
 	const look = currentLookOrThrow();
 	const actTarget = actTargetFromParams(params, look, action);
@@ -1972,7 +1934,7 @@ async function performTypeText(params: TypeTextParams, signal?: AbortSignal): Pr
 		throw new Error("type_text is not supported for browser contexts because it has no ref parameter. Use set_text with a browser ref from snapshot instead.");
 	}
 	runtimeState.currentImageMode = normalizeImageMode(params.image);
-	await selectWindowIfProvided(params.window, signal);
+	await selectWindowIfProvided(((params as any).root ?? params.window), signal);
 	validateStateId(params.stateId);
 	const look = currentLookOrThrow();
 	const text = typeof params.text === "string" ? params.text : "";
@@ -1990,7 +1952,7 @@ async function performSetText(params: SetTextParams, signal?: AbortSignal): Prom
 	const browserResult = await performBrowserSetText(params, signal);
 	if (browserResult) return browserResult;
 	runtimeState.currentImageMode = normalizeImageMode(params.image);
-	await selectWindowIfProvided(params.window, signal);
+	await selectWindowIfProvided(((params as any).root ?? params.window), signal);
 	validateStateId(params.stateId);
 	const look = currentLookOrThrow();
 	const text = typeof params.text === "string" ? params.text : "";
@@ -2006,7 +1968,7 @@ async function performSetText(params: SetTextParams, signal?: AbortSignal): Prom
 
 async function performKeypress(params: KeypressParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | ConfirmationDetails>> {
 	runtimeState.currentImageMode = normalizeImageMode(params.image);
-	await selectWindowIfProvided(params.window, signal);
+	await selectWindowIfProvided(((params as any).root ?? params.window), signal);
 	validateStateId(params.stateId);
 	const look = currentLookOrThrow();
 	const keys = normalizeKeyList(params.keys);
@@ -2029,7 +1991,7 @@ async function performScroll(params: ScrollParams, signal?: AbortSignal): Promis
 	const browserResult = await performBrowserScroll(params, signal);
 	if (browserResult) return browserResult;
 	runtimeState.currentImageMode = normalizeImageMode(params.image);
-	await selectWindowIfProvided(params.window, signal);
+	await selectWindowIfProvided(((params as any).root ?? params.window), signal);
 	validateStateId(params.stateId);
 	const look = currentLookOrThrow();
 	const ref = trimOrUndefined(params.ref);
@@ -2053,7 +2015,7 @@ async function performScroll(params: ScrollParams, signal?: AbortSignal): Promis
 
 async function performMoveMouse(params: MoveMouseParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | ConfirmationDetails>> {
 	runtimeState.currentImageMode = normalizeImageMode(params.image);
-	await selectWindowIfProvided(params.window, signal);
+	await selectWindowIfProvided(((params as any).root ?? params.window), signal);
 	validateStateId(params.stateId);
 	const look = currentLookOrThrow();
 	const actTarget = actTargetFromParams(params, look, "moveMouse");
@@ -2069,7 +2031,7 @@ async function performMoveMouse(params: MoveMouseParams, signal?: AbortSignal): 
 
 async function performDrag(params: DragParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | ConfirmationDetails>> {
 	runtimeState.currentImageMode = normalizeImageMode(params.image);
-	await selectWindowIfProvided(params.window, signal);
+	await selectWindowIfProvided(((params as any).root ?? params.window), signal);
 	validateStateId(params.stateId);
 	const look = currentLookOrThrow();
 	const actTarget = actTargetFromParams(params, look, "drag");
@@ -2154,7 +2116,7 @@ async function performNavigateBrowser(params: NavigateBrowserParams, signal?: Ab
 		return await refreshBrowserSnapshot(contextId, params.image, signal);
 	}
 	runtimeState.currentImageMode = normalizeImageMode(params.image);
-	await selectWindowIfProvided(params.window, signal);
+	await selectWindowIfProvided(((params as any).root ?? params.window), signal);
 	const target = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
 	assertBrowserUseAllowed(target);
 	if (!currentPlatformBackend.isBrowserApp(target.appName, target.bundleId)) {
@@ -2221,7 +2183,7 @@ async function performEvaluateBrowser(params: EvaluateBrowserParams): Promise<Ag
 
 async function performWait(params: WaitParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails>> {
 	runtimeState.currentImageMode = normalizeImageMode(params.image);
-	await selectWindowIfProvided(params.window, signal);
+	await selectWindowIfProvided(((params as any).root ?? params.window), signal);
 	if (!runtimeState.currentTarget) {
 		throw new Error(MISSING_TARGET_ERROR);
 	}
@@ -2257,8 +2219,7 @@ function makeToolExecutor<P, D>(perform: (params: P, signal?: AbortSignal) => Pr
 	): Promise<AgentToolResult<D>> => await executeTool(ctx, signal, () => perform(params, signal));
 }
 
-export const executeListApps = makeToolExecutor((_params: Record<string, never>, signal) => performListApps(signal));
-export const executeListWindows = makeToolExecutor(performListWindows);
+export const executeFind = makeToolExecutor(performListWindows);
 export const executeListContexts = makeToolExecutor((_params: Record<string, never>, signal) => performListContexts(signal));
 export const executeReadText = makeToolExecutor(performReadText);
 export const executeWaitFor = makeToolExecutor(performWaitFor);
@@ -2280,7 +2241,7 @@ export function reconstructStateFromBranch(ctx: ExtensionContext): void {
 	runtimeState.currentNote = undefined;
 	runtimeState.windowRefs.clear();
 	runtimeState.windowRefByIdentity.clear();
-	runtimeState.nextWindowRefIndex = 1;
+	runtimeState.nextRootRefIndex = 1;
 
 	let restoredCurrent = false;
 	for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {
@@ -2290,7 +2251,7 @@ export function reconstructStateFromBranch(ctx: ExtensionContext): void {
 		if (!AGENT_TOOL_NAMES.has(message.toolName)) continue;
 
 		const rawDetails = message.details as any;
-		if (rawDetails?.tool === "list_windows" && Array.isArray(rawDetails.windows)) {
+		if (rawDetails?.tool === "find" && Array.isArray(rawDetails.windows)) {
 			for (const window of rawDetails.windows) {
 				if (typeof window?.windowRef !== "string" || !Number.isFinite(window?.pid)) continue;
 				const record: WindowRefRecord = {
@@ -2315,8 +2276,8 @@ export function reconstructStateFromBranch(ctx: ExtensionContext): void {
 				};
 				runtimeState.windowRefs.set(record.ref, record);
 				runtimeState.windowRefByIdentity.set(windowRecordIdentity(record), record.ref);
-				const match = /^@w(\d+)$/.exec(record.ref);
-				if (match) runtimeState.nextWindowRefIndex = Math.max(runtimeState.nextWindowRefIndex, Number(match[1]) + 1);
+				const match = /^@r(\d+)$/.exec(record.ref);
+				if (match) runtimeState.nextRootRefIndex = Math.max(runtimeState.nextRootRefIndex, Number(match[1]) + 1);
 			}
 			continue;
 		}

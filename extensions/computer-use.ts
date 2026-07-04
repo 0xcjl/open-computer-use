@@ -7,9 +7,8 @@ import {
 	executeExpandUi,
 	executeInspectUi,
 	executeLaunchBrowserContext,
-	executeListApps,
 	executeListContexts,
-	executeListWindows,
+	executeFind,
 	executeNavigateBrowser,
 	executeObserve,
 	executeReadText,
@@ -19,34 +18,25 @@ import {
 } from "../src/bridge.ts";
 import { getLoadedComputerUseConfig, loadComputerUseConfig } from "../src/config.ts";
 
-const contextId = Type.Optional(Type.String({ description: "Optional context id from list_contexts, e.g. desktop:@w1 or browser:<targetId>" }));
+const contextId = Type.Optional(Type.String({ description: "Optional context id from list_contexts, e.g. desktop:@r1 or browser:<targetId>" }));
 const stateId = Type.Optional(Type.String({ description: "Optional state id from the latest observe/snapshot" }));
-const window = Type.Optional(Type.Union([Type.String({ description: "Window ref from list_windows, e.g. @w1" }), Type.Number({ description: "Numeric windowId" })]));
+const root = Type.Optional(Type.Union([Type.String({ description: "Root ref from find, e.g. @r1" }), Type.Number({ description: "Numeric windowId" })]));
 const image = Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("always"), Type.Literal("never")], { description: "Image attachment mode, default auto" }));
 const responseMode = Type.Optional(Type.Union([Type.Literal("state"), Type.Literal("confirmation")], { description: "Use confirmation to skip returned state." }));
 
-const listAppsTool = defineTool({
-	name: "list_apps",
-	label: "List Apps",
-	description: "List running apps that can be inspected for computer-use windows.",
-	promptSnippet: "Discover running apps before choosing a window.",
-	executionMode: "sequential",
-	parameters: Type.Object({}),
-	execute: executeListApps,
-});
-
-const listWindowsTool = defineTool({
-	name: "list_windows",
-	label: "List Windows",
-	description: "List controllable windows with ids, refs, geometry, and focus state.",
-	promptSnippet: "Choose a target window before observe.",
+const findTool = defineTool({
+	name: "find",
+	label: "Find Roots",
+	description: "Find controllable UI roots with refs, geometry, and focus state.",
+	promptSnippet: "Find a target root before observe when needed.",
 	executionMode: "sequential",
 	parameters: Type.Object({
 		app: Type.Optional(Type.String({ description: "App name filter" })),
 		bundleId: Type.Optional(Type.String({ description: "Bundle ID filter" })),
 		pid: Type.Optional(Type.Number({ description: "Process id filter" })),
+		kind: Type.Optional(Type.Union([Type.Literal("window"), Type.Literal("menu"), Type.Literal("sheet"), Type.Literal("popover"), Type.Literal("dialog")], { description: "Root kind filter" })),
 	}),
-	execute: executeListWindows,
+	execute: executeFind,
 });
 
 const listContextsTool = defineTool({
@@ -72,7 +62,7 @@ const observeTool = defineTool({
 	parameters: Type.Object({
 		app: Type.Optional(Type.String({ description: "Optional app name" })),
 		windowTitle: Type.Optional(Type.String({ description: "Optional exact window title" })),
-		window,
+		root,
 		mode: Type.Optional(Type.Union([Type.Literal("semantic"), Type.Literal("visual"), Type.Literal("fused")], { description: "Observation mode, default fused" })),
 		image,
 	}),
@@ -91,7 +81,7 @@ const searchUiTool = defineTool({
 		action: Type.Optional(Type.String({ description: "Action/capability, e.g. press" })),
 		source: Type.Optional(Type.String({ description: "Ignored compatibility field; outline search has one source" })),
 		limit: Type.Optional(Type.Number({ description: "Maximum results, default 12" })),
-		window,
+		root,
 		stateId,
 	}),
 	execute: executeSearchUi,
@@ -106,7 +96,7 @@ const expandUiTool = defineTool({
 	parameters: Type.Object({
 		ref: Type.String({ description: "Outline ref from observe/search_ui, e.g. @e12" }),
 		depth: Type.Optional(Type.Number({ description: "Outline subtree depth, default 3" })),
-		window,
+		root,
 		stateId,
 	}),
 	execute: executeExpandUi,
@@ -121,7 +111,7 @@ const inspectUiTool = defineTool({
 	parameters: Type.Object({
 		ref: Type.String({ description: "Outline ref from observe/search_ui, e.g. @e12" }),
 		includeRaw: Type.Optional(Type.Boolean({ description: "Include the serialized outline node in details" })),
-		window,
+		root,
 		stateId,
 	}),
 	execute: executeInspectUi,
@@ -147,7 +137,7 @@ const actTool = defineTool({
 		clickCount: Type.Optional(Type.Number({ description: "Click count for click/doubleClick" })),
 		ms: Type.Optional(Type.Number({ description: "Wait duration in milliseconds" })),
 		contextId,
-		window,
+		root,
 		stateId,
 		image,
 		responseMode,
@@ -161,7 +151,7 @@ const readTextTool = defineTool({
 	description: "Read text from a text-bearing desktop UI ref or browser context, with pagination.",
 	promptSnippet: "Fetch full text when observe/inspect shows a truncated text-bearing ref.",
 	executionMode: "sequential",
-	parameters: Type.Object({ ref: Type.Optional(Type.String()), contextId, offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()), window, stateId }),
+	parameters: Type.Object({ ref: Type.Optional(Type.String()), contextId, offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()), root, stateId }),
 	execute: executeReadText,
 });
 
@@ -171,7 +161,7 @@ const waitForTool = defineTool({
 	description: "Wait until desktop UI or browser context text/role appears or disappears.",
 	promptSnippet: "Use after async UI changes instead of polling observe.",
 	executionMode: "sequential",
-	parameters: Type.Object({ text: Type.Optional(Type.String()), role: Type.Optional(Type.String()), gone: Type.Optional(Type.Boolean()), timeoutMs: Type.Optional(Type.Number()), contextId, window, stateId }),
+	parameters: Type.Object({ text: Type.Optional(Type.String()), role: Type.Optional(Type.String()), gone: Type.Optional(Type.Boolean()), timeoutMs: Type.Optional(Type.Number()), contextId, root, stateId }),
 	execute: executeWaitFor,
 });
 
@@ -191,7 +181,7 @@ const navigateBrowserTool = defineTool({
 	description: "Navigate a browser window directly to a URL or search string.",
 	promptSnippet: "Use direct browser navigation instead of address-bar typing when possible.",
 	executionMode: "sequential",
-	parameters: Type.Object({ url: Type.String(), contextId, window, image }),
+	parameters: Type.Object({ url: Type.String(), contextId, root, image }),
 	execute: executeNavigateBrowser,
 });
 
@@ -224,7 +214,7 @@ function isDuplicateToolConflict(error: unknown): boolean {
 
 export default function computerUseExtension(pi: ExtensionAPI): void {
 	try {
-		for (const tool of [listAppsTool, listWindowsTool, listContextsTool, observeTool, searchUiTool, expandUiTool, inspectUiTool, actTool, readTextTool, waitForTool, launchBrowserContextTool, navigateBrowserTool, evaluateBrowserTool]) pi.registerTool(tool);
+		for (const tool of [findTool, listContextsTool, observeTool, searchUiTool, expandUiTool, inspectUiTool, actTool, readTextTool, waitForTool, launchBrowserContextTool, navigateBrowserTool, evaluateBrowserTool]) pi.registerTool(tool);
 	} catch (error) {
 		if (isDuplicateToolConflict(error)) return;
 		throw error;

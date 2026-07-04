@@ -1,11 +1,11 @@
 # Usage
 
-`pi-computer-use` exposes tools for observing and acting on macOS app windows.
+`pi-computer-use` exposes tools for observing and acting on macOS UI roots.
 
 The normal loop is:
 
-1. Choose a window or browser context.
-2. Call `observe`.
+1. Find a root or browser context.
+2. Call `observe` on that root.
 3. Use `search_ui`, `expand_ui`, or `inspect_ui` if the target is not obvious.
 4. Call `act` with a current ref.
 
@@ -13,10 +13,9 @@ The normal loop is:
 
 | Tool | Purpose |
 | --- | --- |
-| `list_apps` | List running macOS apps. |
-| `list_windows` | List controllable desktop windows. |
-| `list_contexts` | List desktop windows and CDP browser pages. |
-| `observe` | Capture one look and return a folded UI outline plus running note. |
+| `find` | Find controllable desktop roots (`window`, `sheet`, `dialog`, `popover`, `menu`). |
+| `list_contexts` | List desktop roots and CDP browser pages. |
+| `observe` | Capture one root look and return a folded UI outline plus running note. |
 | `search_ui` | Search the current outline by text, role, action, or capability. |
 | `expand_ui` | Show local outline context for one ref. |
 | `inspect_ui` | Show fields, rects, actions, annotations, and evidence for one ref. |
@@ -24,16 +23,16 @@ The normal loop is:
 | `read_text` | Page through long text from a text-bearing ref or browser context. |
 | `wait_for` | Wait for text or role to appear or disappear. |
 | `launch_browser_context` | Start a managed CDP browser. |
-| `navigate_browser` | Navigate a browser window or CDP context. |
+| `navigate_browser` | Navigate a browser root or CDP context. |
 | `evaluate_browser` | Run JavaScript in a CDP browser context. |
 
 ## Refs and state
 
-`observe`, `search_ui`, and `expand_ui` return outline refs like `@e12`.
+`find` returns root refs like `@r1`. `observe`, `search_ui`, and `expand_ui` return outline refs like `@e12`.
 
-Use current refs from the latest state. A ref can become stale after the UI changes, the window changes, or a new observation replaces the previous outline.
+Use current refs from the latest state. A ref can become stale after the UI changes, the root changes, or a new observation replaces the previous outline.
 
-Some outline nodes are marked `pictureOnly`. These represent visual evidence without an AX element. They can help the agent understand what is visible, but AX-only actions cannot target them by ref. Use coordinates only when there is no better semantic target.
+Some outline nodes are marked `pictureOnly`. These represent visual evidence without an AX element. They can help the agent understand what is visible, but semantic actions cannot target them by ref. Use coordinates only when there is no better semantic target and the latest look has an image.
 
 ## Observation modes
 
@@ -45,7 +44,7 @@ Some outline nodes are marked `pictureOnly`. These represent visual evidence wit
 | `fused` | Default. Include visual evidence when it is useful. |
 | `visual` | The app is custom drawn or AX is sparse. |
 
-Images are optional. Use `image: "never"` for text-only results, `image: "always"` when visual inspection matters, and `image: "auto"` for the default behavior.
+Images are optional. Sheet/dialog roots may be semantic-only; coordinate actions clearly reject image-less looks.
 
 ## Acting
 
@@ -59,21 +58,21 @@ act({ action: "keypress", keys: ["Enter"] })
 act({ action: "wait", ms: 500 })
 ```
 
-Coordinate fallback uses image pixels from the latest observed window:
+Coordinate fallback uses image pixels from the latest observed image-bearing root:
 
 ```ts
 act({ action: "click", x: 420, y: 300 })
 ```
 
-`act` returns an outcome of `worked`, `didnt`, or `unknown`, plus execution evidence when available.
+`act` returns an outcome of `worked`, `didnt`, or `unknown`, plus execution evidence and shallow root deltas when available.
 
 ## Browser use
 
 For normal browser windows, use the same desktop flow:
 
 ```ts
-list_windows({ app: "Helium" })
-observe({ window: "@w1", mode: "fused" })
+find({ app: "Helium", kind: "window" })
+observe({ root: "@r1", mode: "fused" })
 act({ action: "press", ref: "@e12" })
 ```
 

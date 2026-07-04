@@ -7,7 +7,7 @@ const macosPlatformBackend: ComputerUsePlatformBackend = {
 	name: "macos",
 	ensureReady: ensureMacosReady,
 	listApps: macosBackend.listApps,
-	listWindows: macosBackend.listWindows,
+	listRoots: macosBackend.listRoots,
 	getFrontmost: macosBackend.getFrontmost,
 	focusWindow: macosBackend.focusWindow,
 	observe: macosBackend.observe,
@@ -32,7 +32,7 @@ class UnsupportedPlatformBackend implements ComputerUsePlatformBackend {
 
 	async ensureReady(): Promise<never> { this.unsupported(); }
 	async listApps(): Promise<never> { this.unsupported(); }
-	async listWindows(): Promise<never> { this.unsupported(); }
+	async listRoots(): Promise<never> { this.unsupported(); }
 	async getFrontmost(): Promise<never> { this.unsupported(); }
 	async focusWindow(): Promise<never> { this.unsupported(); }
 	async observe(): Promise<never> { this.unsupported(); }

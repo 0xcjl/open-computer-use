@@ -5,6 +5,7 @@ import type { PermissionStatus } from "../permissions.ts";
 export type PlatformName = "macos" | "windows" | "linux";
 export type NativeInputDelivery = "hid" | "pid";
 export type ActOutcome = "worked" | "didnt" | "unknown";
+export type PlatformRootKind = "window" | "menu" | "sheet" | "popover" | "dialog";
 
 export interface PlatformDiagnostics {
 	protocolVersion: number;
@@ -26,8 +27,8 @@ export interface PlatformReadyState {
 	helperDiagnostics?: PlatformDiagnostics;
 }
 
-export interface PlatformWindowQuery {
-	pid: number;
+export interface PlatformRootQuery {
+	pid?: number;
 }
 
 export interface PlatformApp {
@@ -44,21 +45,28 @@ export interface FramePoints {
 	h: number;
 }
 
-export interface PlatformWindow {
-	windowId?: number;
+export interface PlatformRoot {
+	kind: PlatformRootKind;
+	rootRef?: string;
 	windowRef?: string;
+	windowId?: number;
+	pid?: number;
+	appName?: string;
+	bundleId?: string;
 	title: string;
 	role?: string;
 	subrole?: string;
+	zOrder: number;
 	pairing: { confidence: "exact" | "high" | "low"; score: number };
 	framePoints: FramePoints;
 	scaleFactor: number;
-	isMinimized: boolean;
 	isOnscreen: boolean;
-	isMain: boolean;
 	isFocused: boolean;
+	isMinimized: boolean;
+	isMain: boolean;
 	isModal: boolean;
 	sheetCount: number;
+	metadata?: Record<string, unknown>;
 }
 
 export interface PlatformFrontmostResult {
@@ -67,6 +75,7 @@ export interface PlatformFrontmostResult {
 	pid: number;
 	windowTitle?: string;
 	windowId?: number;
+	rootRef?: string;
 }
 
 export interface PlatformFocusWindowResult {
@@ -81,23 +90,32 @@ export interface HelperActPerformed {
 	refound?: boolean;
 }
 
+export interface PlatformRootDelta {
+	change: "appeared" | "closed" | "focused";
+	kind: string;
+	ref?: string;
+	title?: string;
+	pid: number;
+}
+
 export interface HelperActResult {
 	outcome: ActOutcome;
 	performed?: HelperActPerformed;
 	evidence?: Record<string, unknown>;
 	error?: { code?: string; message?: string; whatIsThere?: unknown };
+	rootDelta?: PlatformRootDelta[];
 }
 
 export interface PlatformTarget {
 	pid?: number;
 	windowId?: number;
-	windowRef?: string;
+	rootRef?: string;
 }
 
 export interface PlatformObserveTarget {
-	pid: number;
-	windowId: number;
-	windowRef?: string;
+	pid?: number;
+	windowId?: number;
+	rootRef?: string;
 }
 
 export interface PlatformObserveRequest {
@@ -105,6 +123,7 @@ export interface PlatformObserveRequest {
 	readText: "auto" | "always" | "never";
 	scopeRef?: string;
 	maxDimension?: number;
+	includeImage?: boolean;
 }
 
 export type PlatformActAction = "press" | "click" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse";
@@ -163,7 +182,7 @@ export interface ComputerUsePlatformBackend {
 	name: PlatformName;
 	ensureReady(ctx: ExtensionContext, state: PlatformReadyState, signal?: AbortSignal): Promise<PlatformReadyState>;
 	listApps(signal?: AbortSignal): Promise<PlatformApp[]>;
-	listWindows(query: PlatformWindowQuery, signal?: AbortSignal): Promise<PlatformWindow[]>;
+	listRoots(query: PlatformRootQuery, signal?: AbortSignal): Promise<PlatformRoot[]>;
 	getFrontmost(signal?: AbortSignal): Promise<PlatformFrontmostResult>;
 	focusWindow(target: PlatformTarget, signal?: AbortSignal): Promise<PlatformFocusWindowResult>;
 	observe(request: PlatformObserveRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<LookResponse>;

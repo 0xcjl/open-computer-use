@@ -218,7 +218,6 @@ export function parseLookResponse(raw: unknown): LookResponse {
 		parsedOutline: outline,
 	};
 	if (!look.lookId) throw new Error("Helper returned a look without lookId.");
-	if (!look.image.jpegBase64) throw new Error("Helper returned a look without jpegBase64 image data.");
 	return look;
 }
 

@@ -1,23 +1,27 @@
-export type WindowSelector = string | number;
+export type RootSelector = string | number;
+export type WindowSelector = RootSelector;
 export type ImageMode = "auto" | "always" | "never";
 export type MouseButtonName = "left" | "right" | "middle";
 
 export interface ObserveTargetParams {
 	app?: string;
 	windowTitle?: string;
-	window?: WindowSelector;
+	root?: RootSelector;
+	window?: RootSelector;
 	image?: ImageMode;
 }
 
-export interface ListWindowsParams {
+export interface FindParams {
 	app?: string;
 	bundleId?: string;
 	pid?: number;
+	kind?: "window" | "menu" | "sheet" | "popover" | "dialog";
 }
 
 export interface WindowTargetParams {
 	contextId?: string;
-	window?: WindowSelector;
+	root?: RootSelector;
+	window?: RootSelector;
 	stateId?: string;
 	image?: ImageMode;
 	responseMode?: "state" | "confirmation";
@@ -132,8 +136,7 @@ export interface WaitForParams extends WindowTargetParams {
 }
 
 export const AGENT_TOOL_NAMES = new Set([
-	"list_apps",
-	"list_windows",
+	"find",
 	"list_contexts",
 	"snapshot",
 	"read_text",

@@ -96,9 +96,9 @@ check("INV-8 deleted architecture-v1 identifiers absent", () => {
 	}
 });
 
-check("INV-5 listWindows pairing parsed", () => {
-	assert(srcFiles.some(([, text]) => /interface (HelperWindow|MacosWindow|PlatformWindow)[\s\S]*pairing:/.test(text)), "HelperWindow lacks required pairing field");
-	assert(srcFiles.some(([, text]) => /function parseWindows[\s\S]*pairing[\s\S]*confidence[\s\S]*score/.test(text)), "listWindows parser does not parse pairing");
+check("INV-5 listRoots pairing parsed", () => {
+	assert(srcFiles.some(([, text]) => /interface (HelperRoot|MacosRoot|PlatformRoot)[\s\S]*pairing:/.test(text)), "PlatformRoot lacks required pairing field");
+	assert(srcFiles.some(([, text]) => /function parseRoots[\s\S]*pairing[\s\S]*confidence[\s\S]*score/.test(text)), "listRoots parser does not parse pairing");
 });
 
 function enclosingFunctionName(text, index) {
@@ -199,7 +199,7 @@ function windowLabel(window) {
 async function pidForWindow(socketPath, windowId) {
 	const apps = await call(socketPath, { id: "inv-apps", cmd: "listApps" });
 	for (const app of Array.isArray(apps) ? apps : []) {
-		const windows = await call(socketPath, { id: `inv-windows-${app.pid}`, cmd: "listWindows", pid: app.pid }).catch(() => []);
+		const windows = ((await call(socketPath, { id: `inv-roots-${app.pid}`, cmd: "listRoots", pid: app.pid }).catch(() => ({ roots: [] }))).roots) ?? [];
 		const match = Array.isArray(windows) ? windows.find((window) => window?.windowId === windowId) : undefined;
 		if (match) return { pid: app.pid, appName: app.appName, title: match.title ?? match.windowTitle };
 	}
@@ -219,16 +219,16 @@ async function liveChecks() {
 		let windows = [];
 		try {
 			const frontmost = await call(socketPath, { id: "inv-frontmost", cmd: "getFrontmost" });
-			windows = await call(socketPath, { id: "inv-windows", cmd: "listWindows", pid: frontmost.pid });
-			check("LIVE listWindows pairing", () => {
-				assert(Array.isArray(windows), "listWindows did not return an array");
+			windows = ((await call(socketPath, { id: "inv-roots", cmd: "listRoots", pid: frontmost.pid })).roots) ?? [];
+			check("LIVE listRoots pairing", () => {
+				assert(Array.isArray(windows), "listRoots did not return an array");
 				for (const window of windows) {
 					assert(["exact", "high", "low"].includes(window?.pairing?.confidence), `invalid pairing ${JSON.stringify(window?.pairing)}`);
 				}
 			});
 		} catch (error) {
 			if (!explicitWindowId) throw error;
-			console.log(`SKIP LIVE listWindows pairing (${error.message}; explicit PI_CU_LIVE_WINDOW_ID=${explicitWindowId})`);
+			console.log(`SKIP LIVE listRoots pairing (${error.message}; explicit PI_CU_LIVE_WINDOW_ID=${explicitWindowId})`);
 		}
 		let target = explicitWindowId && Number.isFinite(explicitWindowId)
 			? { windowId: Math.trunc(explicitWindowId), title: "PI_CU_LIVE_WINDOW_ID", appName: "explicit target" }
