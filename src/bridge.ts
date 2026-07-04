@@ -143,6 +143,7 @@ export interface ListWindowsDetails {
 		role?: string;
 		subrole?: string;
 		pairing: { confidence: "exact" | "high" | "low"; score: number };
+		zOrder: number;
 		browserUseAllowed: boolean;
 		score: number;
 	}>;
@@ -638,8 +639,8 @@ function formatWindowLine(window: ListWindowsDetails["windows"][number]): string
 		.filter(Boolean)
 		.join(", ");
 	const frame = `${Math.round(window.framePoints.x)},${Math.round(window.framePoints.y)} ${Math.round(window.framePoints.w)}x${Math.round(window.framePoints.h)}`;
-	const id = window.windowId ? `windowId ${window.windowId}` : window.nativeWindowRef ? `nativeWindowRef ${window.nativeWindowRef}` : "unstable window id";
-	return `- ${window.windowRef} ${window.app} — ${window.windowTitle || "(untitled)"} (${id}, pid ${window.pid}, frame ${frame}, pairing ${window.pairing.confidence}/${Math.round(window.pairing.score)}, score ${window.score}${flags ? `, ${flags}` : ""})`;
+	const id = window.windowId ? `windowId ${window.windowId}` : window.nativeWindowRef ? `nativeRootRef ${window.nativeWindowRef}` : "unstable root id";
+	return `- ${window.windowRef} ${window.kind} ${window.app} pid ${window.pid} — ${window.windowTitle || "(untitled)"} (z ${window.zOrder}, ${id}, frame ${frame}, pairing ${window.pairing.confidence}/${Math.round(window.pairing.score)}${flags ? `, ${flags}` : ""})`;
 }
 
 async function getFrontmost(signal?: AbortSignal): Promise<FrontmostResult> {
@@ -934,7 +935,20 @@ async function resolveTargetByWindowSelector(selector: WindowSelector, signal?: 
 	if (normalized.startsWith("@r")) {
 		throw new Error(`Root ref '${normalized}' is not available in this session. Call find first.`);
 	}
-	throw new Error(`Unsupported root target '${normalized}'. Use a @r ref from find or a numeric windowId.`);
+
+	const config = getComputerUseConfig();
+	const candidates = await collectWindowDetails(await listApps(signal), config, signal);
+	const query = normalizeText(normalized);
+	const exact = candidates.filter((candidate) => normalizeText(candidate.app) === query || normalizeText(candidate.windowTitle) === query);
+	const fuzzy = exact.length > 0 ? exact : candidates.filter((candidate) => `${normalizeText(candidate.app)} ${normalizeText(candidate.windowTitle)}`.includes(query));
+	const match = fuzzy.sort((a, b) => Number(b.isFocused) - Number(a.isFocused) || a.zOrder - b.zOrder)[0];
+	if (!match) throw new Error(`Root query '${normalized}' did not match any current root. Call find to inspect roots.`);
+	const app: HelperApp = { appName: match.app, bundleId: match.bundleId, pid: match.pid };
+	const roots = await listWindows(match.pid, signal);
+	const helperRoot = roots.find((root) => root.rootRef === match.nativeWindowRef || root.windowRef === match.nativeWindowRef || root.windowId === match.windowId) ?? roots[0];
+	const resolved = toResolvedTarget(app, helperRoot);
+	setCurrentTarget(resolved);
+	return resolved;
 }
 
 async function selectWindowIfProvided(selector: WindowSelector | undefined, signal?: AbortSignal): Promise<void> {
@@ -1156,8 +1170,8 @@ interface CaptureResult {
 function captureForLook(look: LookResponse): CurrentCapture {
 	return {
 		stateId: randomUUID(),
-		width: look.image.width,
-		height: look.image.height,
+		width: look.image?.width ?? 0,
+		height: look.image?.height ?? 0,
 		scaleFactor: look.window.scaleFactor,
 		timestamp: Date.now(),
 	};
@@ -1292,8 +1306,9 @@ async function buildToolResult(
 	const noteText = renderedNote ? `\n\n${renderedNote}` : "";
 	const outlineText = `\n\nOutline (${folded.nodeCount} nodes, lookId ${result.look.lookId}${folded.truncated ? ", folded output truncated" : ""}):\n${folded.text}`;
 	const fallbackText = fallbackReason ? `\n\n${fallbackReason.message}` : "";
-	const content: AgentToolResult<ComputerUseDetails>["content"] = [{ type: "text", text: `${summary}${consoleText}${noteText}${outlineText}${fallbackText}` }];
-	if (fallbackReason && result.look.image.jpegBase64) {
+	const deltaText = rootDeltaLines(execution).join("\n");
+	const content: AgentToolResult<ComputerUseDetails>["content"] = [{ type: "text", text: `${summary}${deltaText ? `\n${deltaText}` : ""}${consoleText}${noteText}${outlineText}${fallbackText}` }];
+	if (fallbackReason && result.look.image?.jpegBase64) {
 		content.push({ type: "image", data: result.look.image.jpegBase64, mimeType: "image/jpeg" });
 	}
 
@@ -1319,8 +1334,8 @@ function currentLookOrThrow(): LookResponse {
 }
 
 function ensurePointIsInLookImage(x: number, y: number, look: LookResponse, errorPrefix = "Coordinates"): void {
-	if (!look.image.jpegBase64) {
-		throw new Error(`${errorPrefix} require an image-bearing root. This look is semantic-only; use an @e ref with a semantic action or observe a window root.`);
+	if (!look.image?.jpegBase64) {
+		throw new Error(`${errorPrefix} require an image-bearing root. This look is outline-only; use an @e ref with a semantic action or observe an image-bearing root.`);
 	}
 	if (!Number.isFinite(x) || !Number.isFinite(y)) {
 		throw new Error(`${errorPrefix} must be finite numbers.`);
@@ -1358,18 +1373,47 @@ function actTargetFromParams(params: { ref?: string; x?: number; y?: number }, l
 		return { x, y };
 	}
 	if (action === "typeText" || action === "keypress") {
+		if (!look.image) throw new Error(`${action} requires an image-bearing root when no ref is provided.`);
 		return { x: Math.floor(look.image.width / 2), y: Math.floor(look.image.height / 2) };
 	}
 	throw new Error(`${action} requires either ref or both x and y.`);
 }
 
+function modelRefForRootDelta(delta: NonNullable<HelperActResult["rootDelta"]>[number]): string | undefined {
+	if (!delta.ref) return undefined;
+	if (delta.ref.startsWith("@r")) return delta.ref;
+	for (const record of runtimeState.windowRefs.values()) {
+		if (record.nativeWindowRef === delta.ref || record.ref === delta.ref) return record.ref;
+	}
+	const ref = `@r${runtimeState.nextRootRefIndex++}`;
+	const current = runtimeState.currentTarget;
+	const record: WindowRefRecord = {
+		ref,
+		appName: current?.pid === delta.pid ? current.appName : "Unknown App",
+		bundleId: current?.pid === delta.pid ? current.bundleId : undefined,
+		pid: delta.pid,
+		windowTitle: delta.title ?? "(untitled)",
+		nativeWindowRef: delta.ref,
+		framePoints: { x: 0, y: 0, w: 1, h: 1 },
+		scaleFactor: 1,
+		isMinimized: false,
+		isOnscreen: true,
+		isMain: false,
+		isFocused: delta.change === "focused",
+	};
+	runtimeState.windowRefs.set(ref, record);
+	runtimeState.windowRefByIdentity.set(windowRecordIdentity(record), ref);
+	return ref;
+}
+
 function executionTraceFromAct(result: HelperActResult): ExecutionTrace {
+	const rootDelta = result.rootDelta?.map((delta) => ({ ...delta, ref: modelRefForRootDelta(delta) }));
 	return executionTrace("act", result.performed?.delivery === "ax" ? "stealth" : "default", {
 		outcome: result.outcome,
 		performed: result.performed,
 		evidence: result.evidence,
 		error: result.error,
-		rootDelta: result.rootDelta,
+		rootDelta,
 		delivery: result.performed?.delivery,
 		deliveryPolicy: currentDeliveryPolicy(),
 	});
@@ -1410,9 +1454,24 @@ function actOutcomeText(execution: ExecutionTrace): string {
 	return " Helper could not verify the result.";
 }
 
+function rootDeltaLines(execution: ExecutionTrace): string[] {
+	return (execution.rootDelta ?? []).map((delta) => {
+		const quotedTitle = delta.title ? ` ${JSON.stringify(delta.title)}` : "";
+		const ref = delta.ref ? ` (${delta.ref.startsWith("@") ? delta.ref : `@${delta.ref}`})` : "";
+		if (delta.change === "appeared") return `New root: ${delta.kind}${quotedTitle}${ref}`;
+		if (delta.change === "closed") return `Root closed: ${delta.kind}${quotedTitle}${ref}`;
+		return `Root focused: ${delta.kind}${quotedTitle}${ref}`;
+	});
+}
+
+function appendRootDeltaText(message: string, execution: ExecutionTrace): string {
+	const lines = rootDeltaLines(execution);
+	return lines.length ? `${message}\n${lines.join("\n")}` : message;
+}
+
 function confirmationToolResult(tool: string, target: ResolvedTarget, execution: ExecutionTrace, message: string): AgentToolResult<ConfirmationDetails> {
 	return {
-		content: [{ type: "text", text: message }],
+		content: [{ type: "text", text: appendRootDeltaText(message, execution) }],
 		details: {
 			tool,
 			status: "ok",
@@ -1425,7 +1484,7 @@ function confirmationToolResult(tool: string, target: ResolvedTarget, execution:
 				windowRef: target.windowRef,
 			},
 			execution,
-			message,
+			message: appendRootDeltaText(message, execution),
 		},
 	};
 }
@@ -1455,7 +1514,12 @@ async function runActionTool(
 			runtimeState.currentNote = noteAfterAct(noteBeforeAct, options.targetRef, captureResult.outline, {
 				window: noteWindowForTarget(captureResult.target, captureResult.look),
 				windowChanged: execution.evidence?.windowChanged === true,
+				rootDelta: execution.rootDelta,
 			});
+			if (execution.rootDelta?.some((delta) => delta.change === "closed" && (delta.ref === readyTarget.windowRef || delta.ref === readyTarget.nativeWindowRef))) {
+				runtimeState.currentLook = undefined;
+				runtimeState.currentCapture = undefined;
+			}
 			return await buildToolResult(tool, summaryFactory(captureResult.target, true, execution), captureResult, execution, signal);
 		});
 	} catch (error) {
@@ -1493,6 +1557,7 @@ async function collectWindowDetails(apps: HelperApp[], config: ReturnType<typeof
 				role: window.role,
 				subrole: window.subrole,
 				pairing: window.pairing,
+				zOrder: window.zOrder,
 				browserUseAllowed: config.browser_use || !currentPlatformBackend.isBrowserApp(app.appName, app.bundleId),
 				score: scoreWindow(window),
 			});
@@ -1505,25 +1570,27 @@ async function collectWindowDetails(apps: HelperApp[], config: ReturnType<typeof
 async function performListWindows(params: FindParams, signal?: AbortSignal): Promise<AgentToolResult<ListWindowsDetails>> {
 	const rawParams = params ?? {};
 	const query: FindParams = {
+		query: trimOrUndefined(rawParams.query),
 		app: trimOrUndefined(rawParams.app),
 		bundleId: trimOrUndefined(rawParams.bundleId),
 		pid: Number.isFinite(rawParams.pid) ? Math.trunc(rawParams.pid!) : undefined,
 		kind: rawParams.kind,
 	};
 	const matchingApps = (await listApps(signal)).filter((app) => appMatchesWindowQuery(app, query));
-	if (matchingApps.length === 0) {
-		throw new Error(
-			`No running app matched find query${query.app ? ` app='${query.app}'` : ""}${query.bundleId ? ` bundleId='${query.bundleId}'` : ""}${query.pid ? ` pid=${query.pid}` : ""}.`,
-		);
-	}
-
 	const config = getComputerUseConfig();
-	const windows = (await collectWindowDetails(matchingApps, config, signal)).filter((root) => !query.kind || root.kind === query.kind);
+	const forest = (await collectWindowDetails(matchingApps, config, signal)).filter((root) => !query.kind || root.kind === query.kind);
+	const normalizedQuery = normalizeText(query.query ?? "");
+	const exact = normalizedQuery ? forest.filter((root) => normalizeText(root.app) === normalizedQuery || normalizeText(root.windowTitle) === normalizedQuery) : [];
+	const fuzzy = normalizedQuery && exact.length === 0
+		? forest.filter((root) => `${normalizeText(root.app)} ${normalizeText(root.windowTitle)}`.includes(normalizedQuery))
+		: [];
+	const windows = (exact.length > 0 ? exact : fuzzy.length > 0 ? fuzzy : forest)
+		.sort((a, b) => Number(b.isFocused) - Number(a.isFocused) || a.zOrder - b.zOrder || a.app.localeCompare(b.app));
 	const details: ListWindowsDetails = { tool: "find", query, windows, config };
 	const lines = windows.map(formatWindowLine);
 	const text = lines.length
-		? `Found ${lines.length} controllable root${lines.length === 1 ? "" : "s"}. Use the @r refs with observe({ root: "@rN" }) or action tools' optional root field.\n${lines.join("\n")}`
-		: `No controllable roots matched the query. Try opening a window or broadening the find filters.`;
+		? `Found ${lines.length} root${lines.length === 1 ? "" : "s"}${query.query ? ` for ${JSON.stringify(query.query)}` : ""}. Use @r refs with observe({ root: "@rN" }).\n${lines.join("\n")}`
+		: `No roots are currently visible to pi-computer-use.`;
 	return { content: [{ type: "text", text }], details };
 }
 

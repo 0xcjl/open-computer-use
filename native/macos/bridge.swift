@@ -27,6 +27,11 @@ final class AXRefStore {
 	private var snapshots: [String: Snapshot] = [:]
 
 	func storeWindow(_ window: AXUIElement) -> String {
+		for (ref, existing) in windows {
+			if CFEqual(existing, window) {
+				return ref
+			}
+		}
 		nextId += 1
 		let ref = "w\(nextId)"
 		windows[ref] = window
@@ -59,6 +64,8 @@ private struct CGWindowCandidate {
 	let title: String
 	let bounds: CGRect
 	let isOnscreen: Bool
+	let layer: Int
+	let zOrder: Int
 }
 
 private struct CGWindowOwnerSummary {
@@ -91,6 +98,7 @@ private struct LookRecord {
 	let windowFrame: CGRect
 	let imageWidth: Int
 	let imageHeight: Int
+	let hasImage: Bool
 }
 
 private struct OCRBox {
@@ -1029,6 +1037,34 @@ final class Bridge {
 				if let bundleId { root["bundleId"] = bundleId }
 				roots.append(root)
 			}
+			let menuElements = openMenuElements(pid: appPid)
+			for (index, candidate) in cgPopupMenuCandidates(pid: appPid).enumerated() {
+				let menuElement = index < menuElements.count ? menuElements[index] : nil
+				let menuRef = menuElement.map { refStore.storeWindow($0) } ?? "cgmenu:\(candidate.windowId)"
+				var menu: [String: Any] = [
+					"kind": "menu",
+					"rootRef": menuRef,
+					"windowRef": menuRef,
+					"windowId": Int(candidate.windowId),
+					"zOrder": candidate.zOrder,
+					"title": menuElement.flatMap { stringAttribute($0, attribute: kAXTitleAttribute as CFString) } ?? candidate.title,
+					"role": "AXMenu",
+					"subrole": "",
+					"isModal": false,
+					"sheetCount": 0,
+					"framePoints": ["x": candidate.bounds.origin.x, "y": candidate.bounds.origin.y, "w": candidate.bounds.width, "h": candidate.bounds.height],
+					"scaleFactor": displayScaleFactor(for: candidate.bounds),
+					"isMinimized": false,
+					"isOnscreen": candidate.isOnscreen,
+					"isMain": false,
+					"isFocused": true,
+					"pairing": ["confidence": menuElement == nil ? "low" : "high", "score": menuElement == nil ? 0 : 100],
+					"pid": rawPid,
+					"appName": appName,
+				]
+				if let bundleId { menu["bundleId"] = bundleId }
+				roots.append(menu)
+			}
 		}
 		roots.sort { (($0["zOrder"] as? Int) ?? Int.max) < (($1["zOrder"] as? Int) ?? Int.max) }
 		return ["roots": roots]
@@ -1067,7 +1103,7 @@ final class Bridge {
 				"kind": rootKind(role: axRole, subrole: axSubrole),
 				"rootRef": windowRef,
 				"windowRef": windowRef,
-				"zOrder": zIndex,
+				"zOrder": candidate?.zOrder ?? zIndex,
 				"title": title,
 				"role": axRole,
 				"subrole": axSubrole,
@@ -1098,7 +1134,7 @@ final class Bridge {
 					"kind": "sheet",
 					"rootRef": sheetRef,
 					"windowRef": sheetRef,
-					"zOrder": zIndex,
+					"zOrder": candidate?.zOrder ?? zIndex,
 					"title": stringAttribute(sheet, attribute: kAXTitleAttribute as CFString) ?? title,
 					"role": stringAttribute(sheet, attribute: kAXRoleAttribute as CFString) ?? "AXSheet",
 					"subrole": stringAttribute(sheet, attribute: kAXSubroleAttribute as CFString) ?? "",
@@ -1106,10 +1142,10 @@ final class Bridge {
 					"framePoints": ["x": sheetFrame.origin.x, "y": sheetFrame.origin.y, "w": sheetFrame.width, "h": sheetFrame.height],
 					"scaleFactor": displayScaleFactor(for: sheetFrame),
 					"isMinimized": false,
-					"isOnscreen": true,
+					"isOnscreen": candidate?.isOnscreen ?? !isMinimized,
 					"isMain": false,
 					"isFocused": isFocused,
-					"pairing": ["confidence": "low", "score": 0],
+					"pairing": ["confidence": pairing.confidence, "score": pairing.score],
 				])
 			}
 		}
@@ -1125,8 +1161,10 @@ final class Bridge {
 			throw BridgeFailure(message: "readText must be auto, always, or never", code: "invalid_args")
 		}
 
+		let requestedRoot = windowRef.flatMap { refStore.window(for: $0) }
+		let requestedRole = requestedRoot.flatMap { stringAttribute($0, attribute: kAXRoleAttribute as CFString) } ?? ""
 		let captureStart = Date()
-		let capture = try windowId.map { try captureWindow(windowId: $0) }
+		let capture = try requestedRole == "AXMenu" ? nil : windowId.map { try captureWindow(windowId: $0) }
 		let captureMs = capture.map { _ in elapsedMs(captureStart) } ?? 0
 
 		let pid: Int32
@@ -1154,7 +1192,7 @@ final class Bridge {
 		let rootFrame = frameForWindow(window)
 		let imageWidth: Int
 		let imageHeight: Int
-		let imagePayload: [String: Any]
+		let imagePayload: [String: Any]?
 		let transform: (CGRect) -> CGRect
 		if let capture {
 			let outputImage = downscaledImage(capture.image, maxDimension: maxDimension) ?? capture.image
@@ -1168,7 +1206,7 @@ final class Bridge {
 		} else {
 			imageWidth = max(1, Int(rootFrame.width))
 			imageHeight = max(1, Int(rootFrame.height))
-			imagePayload = ["jpegBase64": "", "width": imageWidth, "height": imageHeight]
+			imagePayload = nil
 			transform = rectTransform(windowFrame: rootFrame, imageWidth: imageWidth, imageHeight: imageHeight)
 		}
 		let describeStart = Date()
@@ -1185,12 +1223,12 @@ final class Bridge {
 
 		nextLookId += 1
 		let lookId = "look_\(nextLookId)"
-		storeLookRecord(LookRecord(lookId: lookId, windowId: windowId ?? 0, windowFrame: capture?.frame ?? rootFrame, imageWidth: imageWidth, imageHeight: imageHeight))
+		storeLookRecord(LookRecord(lookId: lookId, windowId: windowId ?? 0, windowFrame: capture?.frame ?? rootFrame, imageWidth: imageWidth, imageHeight: imageHeight, hasImage: capture != nil))
 		let scale = (capture?.frame.width ?? rootFrame.width) > 0 ? Double(imageWidth) / (capture?.frame.width ?? rootFrame.width) : displayScaleFactor(for: rootFrame)
 		let pairing = pairingForWindow(window, pid: pid)
 		let role = stringAttribute(window, attribute: kAXRoleAttribute as CFString) ?? ""
 		let subrole = stringAttribute(window, attribute: kAXSubroleAttribute as CFString) ?? ""
-		return [
+		var response: [String: Any] = [
 			"lookId": lookId,
 			"capturedAt": captureStart.timeIntervalSince1970,
 			"window": [
@@ -1204,10 +1242,11 @@ final class Bridge {
 				"role": role,
 				"subrole": subrole,
 			],
-			"image": imagePayload,
 			"outline": outline.payload(),
 			"timings": ["captureMs": captureMs, "describeMs": describeMs, "readTextMs": readTextMs],
 		]
+		if let imagePayload { response["image"] = imagePayload }
+		return response
 	}
 
 	private func elapsedMs(_ start: Date) -> Int {
@@ -1494,6 +1533,8 @@ final class Bridge {
 		var element: AXUIElement?
 		var rawPoint: CGPoint?
 		var preflightCapsUnknown = false
+		let beforeRootSnapshot = rootMetadataSnapshot(pid: pid)
+		let beforeFrontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
 		let beforeSheetCount = windowElement(pid: pid, windowId: record.windowId).map { axElementArray($0, attribute: "AXSheets" as CFString).count } ?? 0
 		let beforeFocusedWindow = focusedWindowSummary(pid: pid)
 		let beforeValue: String?
@@ -1513,6 +1554,9 @@ final class Bridge {
 			beforeValue = stringAttribute(stored, attribute: kAXValueAttribute as CFString)
 			beforeSelected = stringAttribute(stored, attribute: kAXSelectedTextAttribute as CFString)
 		} else if let xNumber = target["x"] as? NSNumber, let yNumber = target["y"] as? NSNumber {
+			guard record.hasImage else {
+				throw BridgeFailure(message: "Coordinate targeting is unavailable for this outline-only root", code: "coordinate_unavailable_for_root")
+			}
 			rawPoint = lookPoint(record: record, x: xNumber.doubleValue, y: yNumber.doubleValue)
 			beforeValue = nil
 			beforeSelected = nil
@@ -1538,6 +1582,9 @@ final class Bridge {
 		}
 
 		func executeCoordinates(_ point: CGPoint) throws {
+			guard record.hasImage else {
+				throw BridgeFailure(message: "Coordinate grounding is unavailable for this outline-only root", code: "coordinate_unavailable_for_root")
+			}
 			if policy == "ax_only" {
 				throw BridgeFailure(message: "AX-only policy blocks coordinate grounding", code: "coordinate_blocked")
 			}
@@ -1585,7 +1632,7 @@ final class Bridge {
 				performed["grounding"] = "description"
 				performed["delivery"] = "ax"
 				let value = stringAttribute(element, attribute: kAXValueAttribute as CFString) ?? ""
-				return ["outcome": value == text ? "worked" : "didnt", "performed": performed, "evidence": ["value": value]]
+				return attachRootDelta(to: ["outcome": value == text ? "worked" : "didnt", "performed": performed, "evidence": ["value": value]], before: beforeRootSnapshot, beforeFrontmostPid: beforeFrontmostPid, pid: pid)
 			}
 			try executeCoordinates(coordinatePoint())
 		} else if action == "typeText" {
@@ -1610,7 +1657,7 @@ final class Bridge {
 				performed["grounding"] = "description"
 				performed["delivery"] = "ax"
 				let after = scrollPositionSignature(element)
-				return ["outcome": before != after ? "worked" : "unknown", "performed": performed]
+				return attachRootDelta(to: ["outcome": before != after ? "worked" : "unknown", "performed": performed], before: beforeRootSnapshot, beforeFrontmostPid: beforeFrontmostPid, pid: pid)
 			}
 			try executeCoordinates(coordinatePoint())
 		} else {
@@ -1633,7 +1680,62 @@ final class Bridge {
 		if windowChanged { evidence["windowChanged"] = true }
 		var response: [String: Any] = ["outcome": outcome, "performed": performed]
 		if !evidence.isEmpty { response["evidence"] = evidence }
-		return response
+		return attachRootDelta(to: response, before: beforeRootSnapshot, beforeFrontmostPid: beforeFrontmostPid, pid: pid)
+	}
+
+	private func rootIdentity(_ root: [String: Any]) -> String {
+		if let windowId = root["windowId"] as? Int, windowId > 0 { return "window:\(windowId)" }
+		// AXUIElement CFEqual/CFHash are not stable after re-enumeration for all
+		// transient roots; use the metadata tuple that comes from the cheap pass.
+		let kind = root["kind"] as? String ?? "window"
+		let title = root["title"] as? String ?? ""
+		let role = root["role"] as? String ?? ""
+		let frame = root["framePoints"] as? [String: Any] ?? [:]
+		let x = Int((frame["x"] as? NSNumber)?.doubleValue ?? 0)
+		let y = Int((frame["y"] as? NSNumber)?.doubleValue ?? 0)
+		let w = Int((frame["w"] as? NSNumber)?.doubleValue ?? 0)
+		let h = Int((frame["h"] as? NSNumber)?.doubleValue ?? 0)
+		return "meta:\(kind):\(role):\(title):\(x),\(y),\(w),\(h)"
+	}
+
+	private func rootMetadataSnapshot(pid: Int32) -> [String: [String: Any]] {
+		let roots = ((try? listRoots(pid: pid)["roots"] as? [[String: Any]]) ?? [])
+		return Dictionary(uniqueKeysWithValues: roots.map { (rootIdentity($0), $0) })
+	}
+
+	private func rootDelta(before: [String: [String: Any]], beforeFrontmostPid: pid_t?, pid: Int32) -> [[String: Any]] {
+		let after = rootMetadataSnapshot(pid: pid)
+		var delta: [[String: Any]] = []
+		for (key, root) in after where before[key] == nil {
+			delta.append(rootDeltaItem(change: "appeared", root: root, pid: pid))
+		}
+		for (key, root) in before where after[key] == nil {
+			delta.append(rootDeltaItem(change: "closed", root: root, pid: pid))
+		}
+		for (key, root) in after {
+			if (root["isFocused"] as? Bool) == true && (before[key]?["isFocused"] as? Bool) != true {
+				delta.append(rootDeltaItem(change: "focused", root: root, pid: pid))
+			}
+		}
+		if let beforeFrontmostPid, beforeFrontmostPid != NSWorkspace.shared.frontmostApplication?.processIdentifier {
+			if let frontmost = NSWorkspace.shared.frontmostApplication {
+				delta.append(["change": "focused", "kind": "app", "title": frontmost.localizedName ?? processName(pid: frontmost.processIdentifier) ?? "Unknown App", "pid": Int(frontmost.processIdentifier)])
+			}
+		}
+		return delta
+	}
+
+	private func rootDeltaItem(change: String, root: [String: Any], pid: Int32) -> [String: Any] {
+		var item: [String: Any] = ["change": change, "kind": root["kind"] as? String ?? "window", "title": root["title"] as? String ?? "", "pid": root["pid"] as? Int ?? Int(pid)]
+		if let ref = root["rootRef"] as? String ?? root["windowRef"] as? String { item["ref"] = ref }
+		return item
+	}
+
+	private func attachRootDelta(to response: [String: Any], before: [String: [String: Any]], beforeFrontmostPid: pid_t?, pid: Int32) -> [String: Any] {
+		var output = response
+		let delta = rootDelta(before: before, beforeFrontmostPid: beforeFrontmostPid, pid: pid)
+		if !delta.isEmpty { output["rootDelta"] = delta }
+		return output
 	}
 
 	private func focusedWindowSummary(pid: Int32) -> String {
@@ -2209,7 +2311,7 @@ final class Bridge {
 		}
 
 		var candidates: [CGWindowCandidate] = []
-		for entry in entries {
+		for (zOrder, entry) in entries.enumerated() {
 			guard let ownerPid = (entry[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
 				ownerPid == pid
 			else {
@@ -2234,11 +2336,54 @@ final class Bridge {
 					windowId: windowNumber,
 					title: title,
 					bounds: bounds,
-					isOnscreen: isOnscreen
+					isOnscreen: isOnscreen,
+					layer: layer,
+					zOrder: zOrder
 				)
 			)
 		}
 		return candidates
+	}
+
+	private func cgPopupMenuCandidates(pid: Int32?) -> [CGWindowCandidate] {
+		guard let entries = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
+			return []
+		}
+		let popupLevel = Int(CGWindowLevelForKey(.popUpMenuWindow))
+		var candidates: [CGWindowCandidate] = []
+		for (zOrder, entry) in entries.enumerated() {
+			guard let ownerPid = (entry[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value else { continue }
+			if let pid, ownerPid != pid { continue }
+			let layer = (entry[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+			if layer != popupLevel { continue }
+			guard let windowNumber = (entry[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+				let boundsDict = entry[kCGWindowBounds as String] as? [String: Any],
+				let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary)
+			else { continue }
+			let title = (entry[kCGWindowName as String] as? String) ?? ""
+			let isOnscreen = (entry[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? true
+			candidates.append(CGWindowCandidate(windowId: windowNumber, title: title, bounds: bounds, isOnscreen: isOnscreen, layer: layer, zOrder: zOrder))
+		}
+		return candidates
+	}
+
+	private func openMenuElements(pid: Int32) -> [AXUIElement] {
+		let app = AXUIElementCreateApplication(pid)
+		let descendants = collectDescendants(startingAt: app, maxDepth: 6)
+		var menus = descendants.filter { (stringAttribute($0, attribute: kAXRoleAttribute as CFString) ?? "") == "AXMenu" }
+		if menus.isEmpty,
+			let focused = copyAttribute(app, attribute: kAXFocusedUIElementAttribute as CFString).flatMap(asAXElement)
+		{
+			var current: AXUIElement? = focused
+			while let element = current {
+				if (stringAttribute(element, attribute: kAXRoleAttribute as CFString) ?? "") == "AXMenu" {
+					menus.append(element)
+					break
+				}
+				current = copyAttribute(element, attribute: kAXParentAttribute as CFString).flatMap(asAXElement)
+			}
+		}
+		return menus
 	}
 
 	private func pairingForWindow(_ window: AXUIElement, pid: Int32) -> WindowPairing {

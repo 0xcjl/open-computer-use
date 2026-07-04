@@ -12,6 +12,7 @@ export interface ObserveTargetParams {
 }
 
 export interface FindParams {
+	query?: string;
 	app?: string;
 	bundleId?: string;
 	pid?: number;

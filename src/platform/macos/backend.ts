@@ -104,18 +104,7 @@ export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRo
 	},
 
 	async act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
-		const before = request.pid ? await this.listRoots({ pid: request.pid }, options?.signal).catch(() => []) : [];
-		const result = await macosHelper.command<HelperActResult>("act", { ...request }, options);
-		const after = request.pid ? await this.listRoots({ pid: request.pid }, options?.signal).catch(() => []) : [];
-		const key = (root: PlatformRoot) => root.rootRef ?? String(root.windowId ?? `${root.kind}:${root.title}:${root.framePoints.x}:${root.framePoints.y}`);
-		const beforeKeys = new Set(before.map(key));
-		const afterKeys = new Set(after.map(key));
-		result.rootDelta = [
-			...after.filter((root) => !beforeKeys.has(key(root))).map((root) => ({ change: "appeared" as const, kind: root.kind, ref: root.rootRef, title: root.title, pid: request.pid! })),
-			...before.filter((root) => !afterKeys.has(key(root))).map((root) => ({ change: "closed" as const, kind: root.kind, ref: root.rootRef, title: root.title, pid: request.pid! })),
-			...after.filter((root) => root.isFocused && !before.find((old) => key(old) === key(root) && old.isFocused)).map((root) => ({ change: "focused" as const, kind: root.kind, ref: root.rootRef, title: root.title, pid: request.pid! })),
-		];
-		return result;
+		return await macosHelper.command<HelperActResult>("act", { ...request }, options);
 	},
 
 	async readText(args: PlatformReadTextRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformReadTextResponse> {

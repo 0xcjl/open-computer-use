@@ -26,6 +26,7 @@ export interface NoteRefreshOutcome {
 	window: NoteWindowInput;
 	windowChanged?: boolean;
 	newWindowLabel?: string;
+	rootDelta?: Array<{ change: string; kind: string; title?: string; ref?: string }>;
 }
 
 function normalizedLabel(value: string): string {
@@ -148,6 +149,14 @@ export function noteAfterAct(prev: WindowNote | undefined, targetRef: string | u
 				note.regions.unshift({ key, label: regionLabel(ancestor), status: "changed", detail: "acted here" });
 			}
 		}
+	}
+	for (const delta of refreshOutcome.rootDelta ?? []) {
+		note.regions.unshift({
+			key: `root:${delta.change}:${delta.ref ?? delta.kind}:${delta.title ?? ""}`,
+			label: `${delta.kind}${delta.title ? ` ${delta.title}` : ""}`,
+			status: delta.change === "closed" ? "changed" : "never-looked",
+			detail: `root ${delta.change}`,
+		});
 	}
 	if (refreshOutcome.windowChanged) {
 		for (const region of note.regions) {

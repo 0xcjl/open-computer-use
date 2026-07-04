@@ -20,7 +20,7 @@ import { getLoadedComputerUseConfig, loadComputerUseConfig } from "../src/config
 
 const contextId = Type.Optional(Type.String({ description: "Optional context id from list_contexts, e.g. desktop:@r1 or browser:<targetId>" }));
 const stateId = Type.Optional(Type.String({ description: "Optional state id from the latest observe/snapshot" }));
-const root = Type.Optional(Type.Union([Type.String({ description: "Root ref from find, e.g. @r1" }), Type.Number({ description: "Numeric windowId" })]));
+const root = Type.Optional(Type.Union([Type.String({ description: "Root ref from find, e.g. @r1, or shorthand query" }), Type.Number({ description: "Numeric windowId" })]));
 const image = Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("always"), Type.Literal("never")], { description: "Image attachment mode, default auto" }));
 const responseMode = Type.Optional(Type.Union([Type.Literal("state"), Type.Literal("confirmation")], { description: "Use confirmation to skip returned state." }));
 
@@ -31,10 +31,11 @@ const findTool = defineTool({
 	promptSnippet: "Find a target root before observe when needed.",
 	executionMode: "sequential",
 	parameters: Type.Object({
-		app: Type.Optional(Type.String({ description: "App name filter" })),
-		bundleId: Type.Optional(Type.String({ description: "Bundle ID filter" })),
-		pid: Type.Optional(Type.Number({ description: "Process id filter" })),
-		kind: Type.Optional(Type.Union([Type.Literal("window"), Type.Literal("menu"), Type.Literal("sheet"), Type.Literal("popover"), Type.Literal("dialog")], { description: "Root kind filter" })),
+		query: Type.Optional(Type.String({ description: "Optional app/title/menu label query; absent or unmatched returns all roots" })),
+		app: Type.Optional(Type.String({ description: "Optional app-name narrowing filter" })),
+		bundleId: Type.Optional(Type.String({ description: "Optional bundle-id narrowing filter" })),
+		pid: Type.Optional(Type.Number({ description: "Optional process-id narrowing filter" })),
+		kind: Type.Optional(Type.Union([Type.Literal("window"), Type.Literal("menu"), Type.Literal("sheet"), Type.Literal("popover"), Type.Literal("dialog")], { description: "Optional root kind narrowing filter" })),
 	}),
 	execute: executeFind,
 });

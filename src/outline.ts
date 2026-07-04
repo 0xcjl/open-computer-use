@@ -73,7 +73,7 @@ export interface LookResponse {
 	lookId: string;
 	capturedAt: number;
 	window: LookWindow;
-	image: LookImage;
+	image?: LookImage;
 	outline: OutlineNode;
 	timings: Record<string, number>;
 	parsedOutline?: Outline;
@@ -190,7 +190,7 @@ function parseNode(raw: unknown, parent?: OutlineNode): OutlineNode {
 
 export function parseLookResponse(raw: unknown): LookResponse {
 	const record = isRecord(raw) ? raw : {};
-	const image = isRecord(record.image) ? record.image : {};
+	const image = isRecord(record.image) ? record.image : undefined;
 	const window = isRecord(record.window) ? record.window : {};
 	const pairing = isRecord(window.pairing) ? window.pairing : {};
 	const confidence = pairing.confidence === "exact" || pairing.confidence === "high" || pairing.confidence === "low" ? pairing.confidence : "low";
@@ -208,11 +208,11 @@ export function parseLookResponse(raw: unknown): LookResponse {
 			role: toString(window.role),
 			subrole: toString(window.subrole),
 		},
-		image: {
+		image: image ? {
 			jpegBase64: toString(image.jpegBase64),
 			width: Math.max(1, Math.trunc(toNumber(image.width, 1))),
 			height: Math.max(1, Math.trunc(toNumber(image.height, 1))),
-		},
+		} : undefined,
 		outline: outline.root,
 		timings: isRecord(record.timings) ? Object.fromEntries(Object.entries(record.timings).map(([key, value]) => [key, toNumber(value)])) : {},
 		parsedOutline: outline,
