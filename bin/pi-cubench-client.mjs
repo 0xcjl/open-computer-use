@@ -49,7 +49,7 @@ try {
 	if (appeared) {
 		observations += 1;
 		await tool(executeObserve, { root: appeared.ref, mode: "fused", image: "never" });
-		const modal = await searchFirst({ text: "Confirm" }) ?? await searchFirst({ text: "Replace" }) ?? await searchFirst({ text: "OK" }) ?? await searchFirst({ role: "AXButton" });
+		const modal = await searchFirst({ text: "Confirm Rename", role: "AXButton" }) ?? await searchFirst({ text: "Confirm", role: "AXButton" }) ?? await searchFirst({ text: "Rename", role: "AXButton" }) ?? await searchFirst({ text: "Replace", role: "AXButton" }) ?? await searchFirst({ text: "OK", role: "AXButton" }) ?? await searchFirst({ text: "Confirm Rename" }) ?? await searchFirst({ text: "Confirm" }) ?? await searchFirst({ role: "AXButton" });
 		if (!modal) throw new Error(`A root appeared (${appeared.kind} ${appeared.title ?? ""}) but no confirm control was found in it.`);
 		await act({ action: "click", ref: modal.ref });
 	}

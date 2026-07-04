@@ -983,7 +983,8 @@ async function resolveCurrentTarget(signal?: AbortSignal): Promise<ResolvedTarge
 
 	const hadStableWindowId = current.windowId > 0;
 	const titleQuery = normalizeText(current.windowTitle);
-	let match = hadStableWindowId ? windows.find((window) => window.windowId !== undefined && window.windowId === current.windowId) : undefined;
+	let match = current.nativeWindowRef ? windows.find((window) => window.windowRef === current.nativeWindowRef || window.rootRef === current.nativeWindowRef) : undefined;
+	match ??= hadStableWindowId ? windows.find((window) => window.windowId !== undefined && window.windowId === current.windowId) : undefined;
 	if (!match) {
 		const exactTitleMatches = titleQuery && titleQuery !== "(untitled)" ? windows.filter((window) => normalizeText(window.title) === titleQuery) : [];
 		if (exactTitleMatches.length === 1) {
@@ -1148,12 +1149,12 @@ async function resolveTargetForObserve(selection: ObserveTargetParams, signal?: 
 }
 
 async function ensureTargetWindowId(target: ResolvedTarget, signal?: AbortSignal): Promise<ResolvedTarget> {
-	if (target.windowId > 0) {
+	if (target.windowId > 0 || target.nativeWindowRef) {
 		return target;
 	}
 
 	const refreshed = await resolveCurrentTarget(signal);
-	if (refreshed.windowId <= 0) {
+	if (refreshed.windowId <= 0 && !refreshed.nativeWindowRef) {
 		throw new Error(CURRENT_TARGET_GONE_ERROR);
 	}
 	return refreshed;
@@ -1178,7 +1179,7 @@ function captureForLook(look: LookResponse): CurrentCapture {
 }
 
 async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; scopeRef?: string; maxDimension?: number }, signal?: AbortSignal): Promise<LookResponse> {
-	if (!Number.isFinite(target.windowId) || target.windowId <= 0) throw new Error(`Current platform requires a stable windowId to observe '${target.windowTitle}'. Call find and select a window with a stable id.`);
+	if ((!Number.isFinite(target.windowId) || target.windowId <= 0) && !target.nativeWindowRef) throw new Error(`Current platform requires a stable root id to observe '${target.windowTitle}'. Call find and select a root with a stable id.`);
 	return await currentPlatformBackend.observe({
 		target: nativeWindowRequest(target),
 		readText: options.readText,
@@ -1200,8 +1201,8 @@ function actTargetPublicRef(params: { ref?: string }): string | undefined {
 	return trimOrUndefined(params.ref);
 }
 
-async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION): Promise<CaptureResult> {
-	let target = await resolveCurrentTarget(signal);
+async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget): Promise<CaptureResult> {
+	let target = targetOverride ?? await resolveCurrentTarget(signal);
 	target = await ensureTargetWindowId(target, signal);
 	const look = await performLook(target, { maxDimension, readText }, signal);
 	const outline = look.parsedOutline!;
@@ -1874,7 +1875,7 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	const requestedTarget = selection.window
 		? await resolveTargetByWindowSelector((params.root ?? params.window)!, signal)
 		: await resolveTargetForObserve(selection, signal);
-	const captureResult = await captureCurrentTarget(signal, readText, normalizeImageMode(image) === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION);
+	const captureResult = await captureCurrentTarget(signal, readText, normalizeImageMode(image) === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION, requestedTarget);
 	// Model @r refs are re-minted on re-resolution, so ref string equality
 	// alone false-positives as drift for the same root; compare stable
 	// identity against the resolved request too.

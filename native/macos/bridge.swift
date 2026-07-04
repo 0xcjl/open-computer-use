@@ -1130,11 +1130,12 @@ final class Bridge {
 			for sheet in sheetElements(of: window) {
 				let sheetRef = refStore.storeWindow(sheet)
 				let sheetFrame = frameForWindow(sheet)
-				output.append([
+				let sheetCandidate = bestCandidate(for: sheet, candidates: candidates)
+				var sheetItem: [String: Any] = [
 					"kind": "sheet",
 					"rootRef": sheetRef,
 					"windowRef": sheetRef,
-					"zOrder": candidate?.zOrder ?? zIndex,
+					"zOrder": sheetCandidate?.zOrder ?? candidate?.zOrder ?? zIndex,
 					"title": stringAttribute(sheet, attribute: kAXTitleAttribute as CFString) ?? title,
 					"role": stringAttribute(sheet, attribute: kAXRoleAttribute as CFString) ?? "AXSheet",
 					"subrole": stringAttribute(sheet, attribute: kAXSubroleAttribute as CFString) ?? "",
@@ -1142,11 +1143,13 @@ final class Bridge {
 					"framePoints": ["x": sheetFrame.origin.x, "y": sheetFrame.origin.y, "w": sheetFrame.width, "h": sheetFrame.height],
 					"scaleFactor": displayScaleFactor(for: sheetFrame),
 					"isMinimized": false,
-					"isOnscreen": candidate?.isOnscreen ?? !isMinimized,
+					"isOnscreen": sheetCandidate?.isOnscreen ?? candidate?.isOnscreen ?? !isMinimized,
 					"isMain": false,
 					"isFocused": isFocused,
-					"pairing": ["confidence": pairing.confidence, "score": pairing.score],
-				])
+					"pairing": ["confidence": sheetCandidate == nil ? pairing.confidence : "high", "score": sheetCandidate == nil ? pairing.score : 100],
+				]
+				if let sheetCandidate { sheetItem["windowId"] = Int(sheetCandidate.windowId) }
+				output.append(sheetItem)
 			}
 		}
 		return output
@@ -1163,8 +1166,9 @@ final class Bridge {
 
 		let requestedRoot = windowRef.flatMap { refStore.window(for: $0) }
 		let requestedRole = requestedRoot.flatMap { stringAttribute($0, attribute: kAXRoleAttribute as CFString) } ?? ""
+		let isMenuRoot = requestedRole == "AXMenu" || (windowRef?.hasPrefix("cgmenu:") == true)
 		let captureStart = Date()
-		let capture = try requestedRole == "AXMenu" ? nil : windowId.map { try captureWindow(windowId: $0) }
+		let capture = try isMenuRoot ? nil : windowId.map { try captureWindow(windowId: $0) }
 		let captureMs = capture.map { _ in elapsedMs(captureStart) } ?? 0
 
 		let pid: Int32
@@ -1176,6 +1180,20 @@ final class Bridge {
 			throw BridgeFailure(message: "Root is not owned by a running app", code: "root_not_found")
 		}
 		ensureEnhancedAccessibility(pid: pid)
+		if let windowRef, windowRef.hasPrefix("cgmenu:"), refStore.window(for: windowRef) == nil {
+			let frame = windowId.flatMap { windowInfo(windowId: $0)?.bounds } ?? CGRect(x: 0, y: 0, width: 1, height: 1)
+			nextLookId += 1
+			let lookId = "look_\(nextLookId)"
+			storeLookRecord(LookRecord(lookId: lookId, windowId: windowId ?? 0, windowFrame: frame, imageWidth: max(1, Int(frame.width)), imageHeight: max(1, Int(frame.height)), hasImage: false))
+			let outline = LookNode(element: nil, ref: windowRef, role: "AXMenu", subrole: "", identifier: "", title: "Menu", description: "", value: "", actions: [], canPress: false, canFocus: false, canSetValue: false, canScroll: false, canIncrement: false, canDecrement: false, isTextInput: false, rect: CGRect(x: 0, y: 0, width: max(1, frame.width), height: max(1, frame.height)), pictureOnly: true)
+			return [
+				"lookId": lookId,
+				"capturedAt": captureStart.timeIntervalSince1970,
+				"window": ["windowId": Int(windowId ?? 0), "rootRef": windowRef, "kind": "menu", "framePoints": ["x": frame.origin.x, "y": frame.origin.y, "w": frame.width, "h": frame.height], "scaleFactor": displayScaleFactor(for: frame), "pairing": ["confidence": "low", "score": 0], "isModal": false, "sheetCount": 0, "role": "AXMenu", "subrole": ""],
+				"outline": outline.payload(),
+				"timings": ["captureMs": 0, "describeMs": 0, "readTextMs": 0],
+			]
+		}
 		guard let window = windowElement(pid: pid, windowId: windowId, windowRef: windowRef) else {
 			throw BridgeFailure(message: "Root is not available through Accessibility", code: "root_not_found")
 		}
@@ -1234,6 +1252,7 @@ final class Bridge {
 			"window": [
 				"windowId": Int(windowId ?? 0),
 				"rootRef": windowRef ?? refStore.storeWindow(window),
+				"kind": rootKind(role: role, subrole: subrole),
 				"framePoints": ["x": (capture?.frame ?? rootFrame).origin.x, "y": (capture?.frame ?? rootFrame).origin.y, "w": (capture?.frame ?? rootFrame).width, "h": (capture?.frame ?? rootFrame).height],
 				"scaleFactor": scale,
 				"pairing": ["confidence": pairing.confidence, "score": pairing.score],
@@ -1918,6 +1937,11 @@ final class Bridge {
 			if pairings[ObjectIdentifier(window)]?.candidate?.windowId == windowId {
 				return window
 			}
+			for sheet in sheetElements(of: window) {
+				if bestCandidate(for: sheet, candidates: candidates)?.windowId == windowId {
+					return sheet
+				}
+			}
 		}
 		return nil
 	}
@@ -2403,6 +2427,14 @@ final class Bridge {
 			}
 		}
 		return menus
+	}
+
+	private func bestCandidate(for element: AXUIElement, candidates: [CGWindowCandidate]) -> CGWindowCandidate? {
+		let title = stringAttribute(element, attribute: kAXTitleAttribute as CFString) ?? ""
+		let frame = frameForWindow(element)
+		return candidates.max { left, right in
+			windowPairScore(frame: frame, title: title, candidate: left) < windowPairScore(frame: frame, title: title, candidate: right)
+		}
 	}
 
 	private func pairingForWindow(_ window: AXUIElement, pid: Int32) -> WindowPairing {

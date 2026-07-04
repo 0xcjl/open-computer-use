@@ -60,6 +60,8 @@ export interface LookImage {
 
 export interface LookWindow {
 	windowId: number;
+	rootRef?: string;
+	kind?: string;
 	framePoints: OutlineRect;
 	scaleFactor: number;
 	pairing: { confidence: "exact" | "high" | "low"; score: number };
@@ -200,6 +202,8 @@ export function parseLookResponse(raw: unknown): LookResponse {
 		capturedAt: toNumber(record.capturedAt, Date.now() / 1000),
 		window: {
 			windowId: Math.trunc(toNumber(window.windowId)),
+			rootRef: toString(window.rootRef) || undefined,
+			kind: toString(window.kind) || undefined,
 			framePoints: parseRect(window.framePoints),
 			scaleFactor: Math.max(1, toNumber(window.scaleFactor, 1)),
 			pairing: { confidence, score: toNumber(pairing.score, Number.NEGATIVE_INFINITY) },
