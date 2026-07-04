@@ -359,6 +359,7 @@ function executionTrace(
 }
 
 function settleMsForExecution(execution: ExecutionTrace): number {
+	if (execution.performed?.deltaSource === "events") return 0;
 	if (execution.variant === "stealth") {
 		switch (execution.strategy) {
 			case "browser_open_location":
