@@ -20,8 +20,6 @@ const helperBundleId = "com.injaneity.pi-computer-use";
 const helperSourcePath = path.join(rootDir, "native", "macos", "bridge.swift");
 const packageJsonPath = path.join(rootDir, "package.json");
 const releaseRepo = "injaneity/pi-computer-use";
-const helperStateDir = path.join(os.homedir(), ".pi-computer-use");
-const helperSigningIdentityMarkerPath = path.join(helperStateDir, ".tcc-signing-identity");
 const localCodeSignCommonName = "pi-computer-use Local Signing";
 
 const args = new Set(process.argv.slice(2));
@@ -300,18 +298,18 @@ async function currentSigningRequirementKey(appPath) {
 	return output.trim() || "unknown";
 }
 
-async function resetTccIfSigningIdentityChanged(appPath) {
+// The previous installed app's signature is the source of truth for whether
+// the signing identity changed. An unknown/unreadable old identity must NOT
+// trigger a reset: wiping TCC rows when the identity is in fact unchanged is
+// exactly the recurring-prompt failure this guards against.
+async function resetTccIfSigningIdentityChanged(appPath, oldIdentity) {
 	if (process.platform !== "darwin") return;
 	const newIdentity = await currentSigningRequirementKey(appPath).catch(() => undefined);
-	if (!newIdentity) return;
-	const oldIdentity = await fs.readFile(helperSigningIdentityMarkerPath, "utf8").then((value) => value.trim(), () => "");
-	if (newIdentity.startsWith("cert:") && newIdentity !== oldIdentity) {
-		await execFile("tccutil", ["reset", "Accessibility", helperBundleId]).catch(() => undefined);
-		await execFile("tccutil", ["reset", "ScreenCapture", helperBundleId]).catch(() => undefined);
-		console.log("[pi-computer-use] cleared any stale Accessibility / Screen Recording grants pinned to a previous local signing identity. Grant once more and future stable-signed local rebuilds should keep working.");
-	}
-	await fs.mkdir(helperStateDir, { recursive: true });
-	await fs.writeFile(helperSigningIdentityMarkerPath, `${newIdentity}\n`).catch(() => undefined);
+	if (!newIdentity || !newIdentity.startsWith("cert:")) return;
+	if (!oldIdentity || !oldIdentity.startsWith("cert:") || newIdentity === oldIdentity) return;
+	await execFile("tccutil", ["reset", "Accessibility", helperBundleId]).catch(() => undefined);
+	await execFile("tccutil", ["reset", "ScreenCapture", helperBundleId]).catch(() => undefined);
+	console.log("[pi-computer-use] cleared stale Accessibility / Screen Recording grants pinned to a previous signing identity. Grant once more and future stable-signed rebuilds should keep working.");
 }
 
 async function helperHasAdhocSignature() {
@@ -328,10 +326,6 @@ async function registerHelperApp() {
 	await run(lsregister, ["-f", helperAppPath]).catch(() => {});
 }
 
-async function clearLocalSigningIdentityMarker() {
-	await fs.rm(helperSigningIdentityMarkerPath, { force: true }).catch(() => {});
-}
-
 async function installPrebuiltHelperApp(sourceAppPath) {
 	await fs.access(path.dirname(helperAppPath), fsConstants.W_OK);
 	const sourceExecutablePath = path.join(sourceAppPath, "Contents", "MacOS", "bridge");
@@ -341,7 +335,6 @@ async function installPrebuiltHelperApp(sourceAppPath) {
 	const existingInfo = await fs.readFile(path.join(helperAppPath, "Contents", "Info.plist"), "utf8").catch(() => undefined);
 	const sourceInfo = await fs.readFile(sourceInfoPath, "utf8");
 	if (existingExecutable?.equals(sourceExecutable) && existingInfo === sourceInfo) {
-		await clearLocalSigningIdentityMarker();
 		await registerHelperApp();
 		return false;
 	}
@@ -354,7 +347,6 @@ async function installPrebuiltHelperApp(sourceAppPath) {
 	// Developer ID designated requirement (identifier + team) is exactly
 	// what lets TCC grant rows survive future updates.
 	await run("/usr/bin/ditto", [sourceAppPath, helperAppPath]);
-	await clearLocalSigningIdentityMarker();
 	await registerHelperApp();
 	return true;
 }
@@ -384,8 +376,9 @@ async function installHelperApp(sourcePath) {
 		// in place so TCC grants survive future native rebuilds.
 		const signingIdentity = process.env.PI_COMPUTER_USE_NO_SIGN === "1" ? "-" : await resolveCodeSignIdentity();
 		if (signingIdentity !== "-" && await helperHasAdhocSignature()) {
+			const oldIdentity = await currentSigningRequirementKey(helperAppPath).catch(() => undefined);
 			await signHelper(helperAppPath, helperBundleId);
-			await resetTccIfSigningIdentityChanged(helperAppPath);
+			await resetTccIfSigningIdentityChanged(helperAppPath, oldIdentity);
 			await registerHelperApp();
 			return true;
 		}
@@ -398,6 +391,7 @@ async function installHelperApp(sourcePath) {
 		throw new Error("Refusing to replace an installed helper with an ad-hoc signed rebuild because macOS may reset Accessibility/Screen Recording grants. Use a pre-signed helper app, install a Developer ID identity, or set PI_COMPUTER_USE_ALLOW_ADHOC_UPDATE=1 for local development.");
 	}
 
+	const oldIdentity = await currentSigningRequirementKey(helperAppPath).catch(() => undefined);
 	await fs.mkdir(path.dirname(helperAppExecutablePath), { recursive: true });
 	await fs.mkdir(path.dirname(helperSourceHashPath), { recursive: true });
 	await fs.copyFile(sourcePath, helperAppExecutablePath);
@@ -405,7 +399,7 @@ async function installHelperApp(sourcePath) {
 	await fs.writeFile(infoPlistPath, infoPlist);
 	await fs.writeFile(helperSourceHashPath, `${sourceHash}\n`);
 	await signHelper(helperAppPath, helperBundleId);
-	await resetTccIfSigningIdentityChanged(helperAppPath);
+	await resetTccIfSigningIdentityChanged(helperAppPath, oldIdentity);
 	await registerHelperApp();
 	return true;
 }
