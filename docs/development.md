@@ -108,4 +108,4 @@ Release setup:
    - `APP_SPECIFIC_PASSWORD`
 4. Push a `v*` tag or run the `Release` workflow manually.
 
-`.github/workflows/release.yml` builds the universal helper, signs it, optionally notarizes it, stages a draft GitHub Release, injects the same signed helper app into the npm package, publishes npm, and only then publishes the GitHub Release.
+`.github/workflows/publish-npm.yml` builds the universal helper, signs it, optionally notarizes it, stages a draft GitHub Release, injects the same signed helper app into the npm package, publishes npm, and only then publishes the GitHub Release.

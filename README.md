@@ -32,7 +32,7 @@ Computer use is most helpful when the only available interface is the app on scr
 ## Install
 
 ```bash
-pi install git:github.com/injaneity/pi-computer-use@v0.4.0
+pi install git:github.com/injaneity/pi-computer-use@v0.4.1
 ```
 
 Start Pi and grant permissions to:
@@ -76,7 +76,7 @@ See [docs/usage.md](./docs/usage.md) for the full tool reference.
 
 The current architecture is centered on `observe` and `act`: first inspect the current UI state, then ask the helper to perform one grounded action transaction. Older direct tools such as `screenshot`, `click`, `set_text`, and `computer_actions` are no longer part of the public extension surface.
 
-Behavioral benchmarking should use `node scripts/cubench.mjs` against the registered extension tools.
+Behavioral benchmarking should use `cubench-runner` with `./bin/pi-cubench-client.mjs`; `node scripts/cubench.mjs` is only the local measurement harness.
 
 ## License
 
