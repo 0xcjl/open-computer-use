@@ -1,6 +1,6 @@
 # Usage
 
-`pi-computer-use` exposes tools for observing and acting on macOS UI roots.
+`pi-computer-use` exposes tools for observing and acting on desktop UI roots on macOS and Windows.
 
 The normal loop is:
 
@@ -32,7 +32,7 @@ The normal loop is:
 
 Use current refs from the latest state. A ref can become stale after the UI changes, the root changes, or a new observation replaces the previous outline.
 
-Some outline nodes are marked `pictureOnly`. These represent visual evidence without an AX element. They can help the agent understand what is visible, but semantic actions cannot target them by ref. Use coordinates only when there is no better semantic target and the latest look has an image.
+Some outline nodes are marked `pictureOnly`. These represent visual evidence without a platform accessibility element. They can help the agent understand what is visible, but semantic actions cannot target them by ref. Use coordinates only when there is no better semantic target and the latest look has an image.
 
 ## Observation modes
 
@@ -40,9 +40,9 @@ Some outline nodes are marked `pictureOnly`. These represent visual evidence wit
 
 | Mode | Use when |
 | --- | --- |
-| `semantic` | AX structure is enough and you want the cheapest result. |
+| `semantic` | Platform accessibility structure is enough and you want the cheapest result. |
 | `fused` | Default. Include visual evidence when it is useful. |
-| `visual` | The app is custom drawn or AX is sparse. |
+| `visual` | The app is custom drawn or the accessibility tree is sparse. |
 
 Images are optional. Sheet/dialog roots may be semantic-only; coordinate actions clearly reject image-less looks.
 

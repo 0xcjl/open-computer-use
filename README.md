@@ -4,7 +4,7 @@
   <img src="./assets/logo/logo3.png" width="50%" alt="pi-computer-use">
 </p>
 
-`pi-computer-use` lets AI agents use macOS apps.
+`pi-computer-use` lets AI agents use desktop apps on macOS and Windows.
 
 An agent can look at an app window, understand the buttons and text inside it, and perform actions like clicking, typing, scrolling, and waiting for something to change. This is useful when the agent needs to work with a normal desktop app instead of an API, a terminal command, or a file.
 
@@ -35,7 +35,9 @@ Computer use is most helpful when the only available interface is the app on scr
 pi install git:github.com/injaneity/pi-computer-use@v0.4.1
 ```
 
-Start Pi and grant permissions to:
+Start Pi and complete the platform setup flow.
+
+On macOS, grant permissions to:
 
 ```text
 /Applications/pi-computer-use.app
@@ -46,7 +48,9 @@ Required macOS permissions:
 - Accessibility
 - Screen Recording, shown as Screen and System Audio Recording on newer macOS versions
 
-The setup flow registers the helper first, so it should already appear in both Settings panes. Enable the toggles and choose Recheck.
+The macOS setup flow registers the helper first, so it should already appear in both Settings panes. Enable the toggles and choose Recheck.
+
+On Windows, use an interactive desktop session. Windows support uses the platform accessibility APIs and does not use the macOS helper app or TCC permission flow.
 
 Use `/computer-use` inside Pi to show the active configuration and where it came from.
 

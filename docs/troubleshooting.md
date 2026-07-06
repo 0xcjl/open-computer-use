@@ -1,6 +1,10 @@
 # Troubleshooting
 
-## Helper app is missing
+## Platform setup
+
+macOS uses an installed helper app and TCC permissions. Windows support uses the active desktop session and Windows accessibility/input APIs; it does not use `/Applications/pi-computer-use.app` or the macOS TCC permission flow.
+
+## macOS helper app is missing
 
 Install the helper from the package:
 
@@ -75,7 +79,7 @@ the helper) or restart Pi.
 
 ## Non-interactive setup fails
 
-macOS permission setup requires an interactive user session. Start Pi interactively, grant permissions, then retry the non-interactive workflow.
+Desktop computer use requires an interactive user session. On macOS, start Pi interactively, grant permissions, then retry the non-interactive workflow. On Windows, use an unlocked interactive desktop session.
 
 ## Browser windows are refused
 
@@ -93,17 +97,17 @@ If `browser_use` is disabled, enable it in either config file:
 }
 ```
 
-## Strict AX mode blocks an action
+## Strict accessibility mode blocks an action
 
-Strict AX mode blocks raw pointer events, raw keyboard events, foreground focus fallback, and cursor takeover.
+Strict accessibility mode blocks raw pointer events, raw keyboard events, foreground focus fallback, and cursor takeover.
 
-Use refs from the latest `observe_ui` result. If the workflow needs raw events, disable strict AX mode.
+Use refs from the latest `observe_ui` result. If the workflow needs raw events, disable strict accessibility mode.
 
 ## State or refs are stale
 
 Refs and coordinates belong to the latest observed state. Call `observe_ui` again and retry with the new `stateId`.
 
-The bridge can sometimes reacquire stale AX refs by role, label, capability, and position, but this is not guaranteed.
+The bridge can sometimes reacquire stale accessibility refs by role, label, capability, and position, but this is not guaranteed.
 
 ## Coordinates are rejected
 
@@ -123,7 +127,7 @@ Check that:
 - Screen Recording is granted.
 - The target app has an open window.
 - The window was not closed between `observe_ui` and `act_ui`.
-- The app is running on macOS.
+- The app is running in a supported desktop session.
 
 If the target is ambiguous, specify the app and window title:
 
@@ -133,4 +137,4 @@ observe_ui({ app: "TextEdit", windowTitle: "Untitled" })
 
 ## Apple Events JavaScript is disabled
 
-Some browser fallback paths require the browser setting "Allow JavaScript from Apple Events". If this is needed, the error message will say so. Enable the setting in the browser and retry.
+On macOS, some browser fallback paths require the browser setting "Allow JavaScript from Apple Events". If this is needed, the error message will say so. Enable the setting in the browser and retry.

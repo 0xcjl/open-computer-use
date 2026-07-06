@@ -1,6 +1,6 @@
 # Architecture
 
-`pi-computer-use` gives Pi agents a small, inspectable interface for macOS GUI control.
+`pi-computer-use` gives Pi agents a small, inspectable interface for desktop GUI control on macOS and Windows.
 
 The core loop is:
 
@@ -17,8 +17,8 @@ A root is a top-level controllable UI surface. The platform seam guarantees only
 | Pi extension | Registers the public tools and schemas. |
 | TypeScript bridge | Manages state, refs, browser/CDP support, notes, outline folding, and tool results. |
 | Platform backend | Exposes a generic root/observe/act contract to shared orchestration. |
-| Native macOS helper | Performs AX inspection, root enumeration, window capture, input dispatch, permission probes, and helper-side action verification. |
-| macOS permissions | Accessibility and Screen Recording remain enforced by the OS. |
+| Native platform backend/helper | Performs accessibility inspection, root enumeration, window capture, input dispatch, permission probes when the OS requires them, and helper-side action verification. |
+| Platform permissions | macOS enforces Accessibility and Screen Recording. Windows support uses the active desktop session and Windows accessibility/input APIs. |
 
 ## Observation
 
@@ -34,14 +34,14 @@ The bridge converts that look into a folded outline. Every visible outline node 
 
 Transient roots may be semantic-only when the OS does not expose a capturable window image. Coordinate actions clearly reject those looks; use semantic `@e` refs instead.
 
-Modality is a platform-reported fact. On macOS, the backend folds AX modal state, attached-sheet presence, and AX dialog/sheet/modal role vocabulary into `isModal`; shared scoring and displacement consume only that fact.
+Modality is a platform-reported fact. Backends fold platform-specific modal/dialog/sheet signals into `isModal`; shared scoring and displacement consume only that fact.
 
 ## Acting
 
 `act_ui` performs one action transaction. The backend/helper owns the actual input decision:
 
 1. resolve the target ref or coordinate
-2. ground it to AX or coordinates
+2. ground it to a platform accessibility element or coordinates
 3. preflight permissions and target state
 4. execute the action
 5. verify what happened when possible

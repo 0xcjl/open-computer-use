@@ -1,6 +1,6 @@
 # Configuration
 
-Configuration controls browser access and strict AX execution.
+Configuration controls browser access and strict accessibility execution.
 
 ## Files
 
@@ -43,9 +43,9 @@ Known browser families include Safari, Chrome and Chromium-family browsers, Fire
 
 Default: `false`
 
-When `true`, actions must use background-safe AX paths. Raw pointer events, raw keyboard events, foreground focus fallback, and cursor takeover are blocked.
+When `true`, actions must use background-safe platform accessibility paths. Raw pointer events, raw keyboard events, foreground focus fallback, and cursor takeover are blocked.
 
-This is also called strict AX mode.
+This is also called strict AX mode in the legacy environment variable names.
 
 ## Environment variables
 
@@ -64,7 +64,7 @@ PI_COMPUTER_USE_CDP_PORT=9222
 
 `PI_COMPUTER_USE_STEALTH=1` and `PI_COMPUTER_USE_STRICT_AX=1` force strict AX mode.
 
-`PI_COMPUTER_USE_HELPER_VARIANT` defaults to `auto`. macOS 14 and newer use the modern ScreenCaptureKit helper. macOS 12 and 13 use the legacy CGWindow and `screencapture` helper. Override this only for testing.
+`PI_COMPUTER_USE_HELPER_VARIANT` is macOS-only and defaults to `auto`. macOS 14 and newer use the modern ScreenCaptureKit helper. macOS 12 and 13 use the legacy CGWindow and `screencapture` helper. Override this only for testing.
 
 ## CDP browser support
 

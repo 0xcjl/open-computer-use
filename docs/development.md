@@ -8,8 +8,9 @@ src/bridge.ts                    TypeScript runtime and tool implementation
 src/outline.ts                   Outline parsing, folding, search, and ref mapping
 src/note.ts                      Disposable running-note generation
 native/macos/bridge.swift        macOS helper for AX, capture, permissions, and input
-scripts/build-native.mjs         Native helper build script
-scripts/setup-helper.mjs         Helper install script
+native/windows/                 Windows backend/helper code when developing on Windows
+scripts/build-native.mjs         macOS helper build script
+scripts/setup-helper.mjs         macOS helper install script
 scripts/check-invariants.mjs     Architecture invariant checks
 ```
 
@@ -23,9 +24,9 @@ Run all static checks:
 npm test
 ```
 
-This runs TypeScript, tool-schema compatibility checks, architecture invariants, and Swift typechecking.
+This runs TypeScript, tool-schema compatibility checks, architecture invariants, and native helper checks available on the current platform.
 
-Rebuild the native helper after Swift changes:
+On macOS, rebuild the native helper after Swift changes:
 
 ```bash
 npm run build:native
@@ -81,19 +82,21 @@ scripts/cubench-results.json
 
 Use it for changes to accessibility traversal, outline folding, visual evidence, action refresh, browser handling, permissions, setup, or payload size.
 
-## Native helper
+## Native platform helpers
 
-The helper installed for permissions is:
+On macOS, the helper installed for permissions is:
 
 ```text
 /Applications/pi-computer-use.app
 ```
 
-Local development can use ad-hoc signing. Release builds must use the release workflow so the helper app is signed with the stable release certificate.
+Local macOS development can use ad-hoc signing. Release builds must use the release workflow so the helper app is signed with the stable release certificate.
+
+On Windows, development uses the Windows platform backend/helper and the active desktop session rather than the macOS app bundle or TCC permission model.
 
 ## Release signing
 
-macOS TCC keys Accessibility and Screen Recording grants to an app's code-signing designated requirement. An ad-hoc signature pins that requirement to the exact binary hash, so updates can orphan existing grants. A stable certificate anchors the requirement on `identifier + certificate leaf`, allowing grants to survive future releases signed with the same certificate.
+This section applies to macOS releases. macOS TCC keys Accessibility and Screen Recording grants to an app's code-signing designated requirement. An ad-hoc signature pins that requirement to the exact binary hash, so updates can orphan existing grants. A stable certificate anchors the requirement on `identifier + certificate leaf`, allowing grants to survive future releases signed with the same certificate.
 
 Release setup:
 
@@ -108,4 +111,4 @@ Release setup:
    - `APP_SPECIFIC_PASSWORD`
 4. Push a `v*` tag or run the `Release` workflow manually.
 
-`.github/workflows/publish-npm.yml` builds the universal helper, signs it, optionally notarizes it, stages a draft GitHub Release, injects the same signed helper app into the npm package, publishes npm, and only then publishes the GitHub Release.
+For macOS, `.github/workflows/publish-npm.yml` builds the universal helper, signs it, optionally notarizes it, stages a draft GitHub Release, injects the same signed helper app into the npm package, publishes npm, and only then publishes the GitHub Release.
