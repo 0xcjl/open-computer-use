@@ -1,9 +1,9 @@
 name: Release
 
 # Release order matters:
-# 1. Build and sign the helper app from the tagged source.
-# 2. Stage a draft GitHub Release with the exact signed helper asset.
-# 3. Publish the npm package with that same signed helper app injected into prebuilt/macos.
+# 1. Build helper artifacts from the tagged source (signed macOS app, Windows exe).
+# 2. Stage a draft GitHub Release with those exact helper assets.
+# 3. Publish the npm package with those same helper artifacts injected into prebuilt/.
 # 4. Publish the GitHub Release only after npm succeeds.
 #
 # This mirrors Pi's release flow: public release publication is last, and any
@@ -185,10 +185,47 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build-windows-helper:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Build Windows helper
+        run: node scripts/build-native.mjs --platform windows
+
+      - name: Validate Windows helper
+        shell: bash
+        run: test -f prebuilt/windows/windows-bridge.exe
+
+      - name: Upload Windows helper payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-helper-${{ env.RELEASE_TAG }}
+          path: prebuilt/windows/windows-bridge.exe
+          if-no-files-found: error
+          retention-days: 14
+
   stage-github-release:
     if: ${{ github.event_name != 'workflow_dispatch' || !inputs.assets_only }}
     runs-on: ubuntu-latest
-    needs: build-signed-helper
+    needs:
+      - build-signed-helper
+      - build-windows-helper
     permissions:
       actions: read
       contents: write
@@ -203,6 +240,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: release-assets-${{ env.RELEASE_TAG }}
+          path: release-assets
+
+      - name: Download Windows helper payload
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-helper-${{ env.RELEASE_TAG }}
           path: release-assets
 
       - name: Validate release notes
@@ -222,7 +265,10 @@ jobs:
           test -f pi-computer-use.app.zip
           test -f pi-computer-use-modern.app.zip
           test -f pi-computer-use-legacy.app.zip
+          test -f windows-bridge.exe
           test -f SHA256SUMS
+          sha256sum -c SHA256SUMS
+          sha256sum windows-bridge.exe >> SHA256SUMS
           sha256sum -c SHA256SUMS
 
       - name: Create draft GitHub Release
@@ -252,9 +298,10 @@ jobs:
             pi-computer-use.app.zip \
             pi-computer-use-modern.app.zip \
             pi-computer-use-legacy.app.zip \
+            windows-bridge.exe \
             SHA256SUMS
 
-          expected_asset_names="$(printf '%s\n' SHA256SUMS pi-computer-use.app.zip pi-computer-use-modern.app.zip pi-computer-use-legacy.app.zip | sort)"
+          expected_asset_names="$(printf '%s\n' SHA256SUMS pi-computer-use.app.zip pi-computer-use-modern.app.zip pi-computer-use-legacy.app.zip windows-bridge.exe | sort)"
           actual_asset_names="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort)"
           if [[ "$actual_asset_names" != "$expected_asset_names" ]]; then
             echo "::error::Draft GitHub Release asset set does not match expected files."
@@ -265,7 +312,9 @@ jobs:
   update-github-release-assets:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.assets_only }}
     runs-on: ubuntu-latest
-    needs: build-signed-helper
+    needs:
+      - build-signed-helper
+      - build-windows-helper
     permissions:
       actions: read
       contents: write
@@ -274,6 +323,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: release-assets-${{ env.RELEASE_TAG }}
+          path: release-assets
+
+      - name: Download Windows helper payload
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-helper-${{ env.RELEASE_TAG }}
           path: release-assets
 
       - name: Replace assets on existing GitHub Release
@@ -286,16 +341,20 @@ jobs:
           test -f pi-computer-use.app.zip
           test -f pi-computer-use-modern.app.zip
           test -f pi-computer-use-legacy.app.zip
+          test -f windows-bridge.exe
           test -f SHA256SUMS
+          sha256sum -c SHA256SUMS
+          sha256sum windows-bridge.exe >> SHA256SUMS
           sha256sum -c SHA256SUMS
           gh release upload "$RELEASE_TAG" \
             pi-computer-use.app.zip \
             pi-computer-use-modern.app.zip \
             pi-computer-use-legacy.app.zip \
+            windows-bridge.exe \
             SHA256SUMS \
             --clobber
 
-          expected_asset_names="$(printf '%s\n' SHA256SUMS pi-computer-use.app.zip pi-computer-use-modern.app.zip pi-computer-use-legacy.app.zip | sort)"
+          expected_asset_names="$(printf '%s\n' SHA256SUMS pi-computer-use.app.zip pi-computer-use-modern.app.zip pi-computer-use-legacy.app.zip windows-bridge.exe | sort)"
           actual_asset_names="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort)"
           if [[ "$actual_asset_names" != "$expected_asset_names" ]]; then
             echo "::error::GitHub Release asset set does not match expected files."
@@ -333,13 +392,20 @@ jobs:
           name: release-assets-${{ env.RELEASE_TAG }}
           path: release-assets
 
-      - name: Inject signed helper app into npm package tree
+      - name: Download Windows helper payload
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-helper-${{ env.RELEASE_TAG }}
+          path: prebuilt/windows
+
+      - name: Inject helper artifacts into npm package tree
         run: |
           set -euo pipefail
           mkdir -p prebuilt/macos/universal/modern
           rm -rf prebuilt/macos/universal/modern/pi-computer-use.app
           /usr/bin/ditto -x -k release-assets/pi-computer-use.app.zip prebuilt/macos/universal/modern
           codesign --verify --strict prebuilt/macos/universal/modern/pi-computer-use.app
+          test -f prebuilt/windows/windows-bridge.exe
 
       - name: Run checks
         run: npm test
@@ -376,6 +442,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - build-signed-helper
+      - build-windows-helper
       - stage-github-release
       - publish-npm
       - publish-github-release

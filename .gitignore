@@ -15,6 +15,3 @@ native/windows/bridge-rs/target/
 # Manual run outputs
 results/
 scripts/cubench-results.json
-
-# Rust build artifacts
-native/windows/bridge-rs/target/
