@@ -1,22 +1,21 @@
-Windows root-forest bridge and live UIA grounding release.
+Windows root-forest bridge and release-pipeline support.
 
 ## Features
 
-- Added a Windows bridge MVP and wired it into the platform-neutral root-forest backend seam.
-- Implemented the Windows helper root-forest protocol with live UIA grounding, scoped deltas, and faster UIA reference lookup.
-- Restored Windows backend wiring and strip-types compatibility for platform checks.
-- Updated documentation to include Windows support and live UIA acceptance notes.
+- Added first-class Windows support: a Rust UIA bridge, TypeScript Windows backend/helper integration, root-forest observation, screenshot capture, UIA grounding, act dispatch, and scoped root deltas.
+- Added Windows native build and install flow, including `build-native.mjs --platform windows`, postinstall prebuilt installation, optional source-build fallback, and release-pipeline injection of `prebuilt/windows/windows-bridge.exe`.
+- Kept the platform seam neutral while aligning macOS and Windows around `find_roots`, `observe_ui`, and `act_ui` root-forest contracts.
+- Expanded Windows documentation, troubleshooting, development notes, and README coverage.
 
 ## Changelog
 
-- refactored the platform seam to simplify platform-neutral contracts and preserve freeform delta sources in `ec6395c`.
-- fixed CI invariants and bounded the macOS semantic tree walk with a 20s deadline in `ebfc888` and `4cf8b41`.
-- renamed the public tools to `find_roots`, `observe_ui`, and `act_ui` in `41b6f5b`.
-- chore allowed docs and perf commit types in release commit validation in `c563352`.
-- added the Windows bridge MVP, root-forest backend seam wiring, helper protocol, and live UIA grounding in `8f429f3`, `96664eb`, `c903522`, and `c04bb4f`.
-- documented Windows bridge acceptance and live UIA acceptance in `b34f987` and `8e8ed9b`.
-- fixed Windows occlusion preflight, delta scoping, seam annotations, win32 backend wiring, and strip-types compatibility in `d8d7b41`, `174ad69`, `495b4be`, `0c9ec73`, and `84743d5`.
-- scoped Rust target ignores to the bridge-rs tree and included Windows in the README in `8877f00` and `3984f04`.
-- chore prepared the v0.4.2 release, added Windows helper build/injection to the release pipeline, and constrained npm package contents to exclude Rust build artifacts.
+- refactored platform contracts and call sites for a platform-neutral root-forest seam across `src/platform/*`, `src/bridge.ts`, `src/contract.ts`, and `extensions/computer-use.ts` in `ec6395c`.
+- fixed CI invariants for the simplified seam and bounded macOS semantic-tree walking in `ebfc888` and `4cf8b41`.
+- renamed public tools from `find`, `observe`, and `act` to `find_roots`, `observe_ui`, and `act_ui` across extension schemas, docs, and bridge code in `41b6f5b`.
+- added the Windows Rust bridge crate, protocol/state/ref tests, UIA traversal, capture, input dispatch, and window helpers under `native/windows/bridge-rs` in `8f429f3`, `c903522`, and `c04bb4f`.
+- wired Windows backend selection, helper spawning, setup/install behavior, build scripts, and static platform checks in `96664eb`, `0c9ec73`, `84743d5`, and `2f3f47b`.
+- fixed Windows UIA occlusion, ancestor comparison, delta scoping, ref lookup performance, seam annotations, and grounding metadata in `d8d7b41`, `174ad69`, and `495b4be`.
+- documented Windows root-forest acceptance, live UIA acceptance, configuration, troubleshooting, and README support in `b34f987`, `8e8ed9b`, and `3984f04`.
+- updated release validation and packaging so docs/perf commits are accepted, Rust build artifacts stay out of npm, and the release pipeline publishes `windows-bridge.exe` alongside macOS helper assets in `c563352`, `8877f00`, and `2f3f47b`.
 
 > "Don't Panic."
