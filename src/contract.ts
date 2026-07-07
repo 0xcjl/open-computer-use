@@ -81,6 +81,7 @@ export interface WaitParams extends WindowTargetParams {
 
 export interface ObserveParams extends ObserveTargetParams {
 	mode?: "semantic" | "visual" | "fused";
+	readText?: "auto" | "always" | "never";
 }
 
 export interface SearchUiParams extends WindowTargetParams {

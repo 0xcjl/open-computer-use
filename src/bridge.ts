@@ -291,6 +291,7 @@ interface RuntimeState {
 	permissionStatus?: PermissionStatus;
 	helperDiagnostics?: PlatformDiagnostics;
 	lastPermissionCheckAt: number;
+	lastSearchOcrEscalatedLookId?: string;
 }
 
 
@@ -1190,13 +1191,14 @@ function captureForLook(look: LookResponse): CurrentCapture {
 	};
 }
 
-async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; scopeRef?: string; maxDimension?: number }, signal?: AbortSignal): Promise<LookResponse> {
+async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; scopeRef?: string; maxDimension?: number; includeImage?: boolean }, signal?: AbortSignal): Promise<LookResponse> {
 	if ((!Number.isFinite(target.windowId) || target.windowId <= 0) && !target.nativeWindowRef) throw new Error(`Current platform requires a stable root id to observe '${target.windowTitle}'. Call find_roots and select a root with a stable id.`);
 	return await currentPlatformBackend.observe({
 		target: nativeWindowRequest(target),
 		readText: options.readText,
 		scopeRef: options.scopeRef,
 		maxDimension: options.maxDimension,
+		includeImage: options.includeImage,
 	}, { signal, timeoutMs: LOOK_TIMEOUT_MS });
 }
 
@@ -1213,10 +1215,10 @@ function actTargetPublicRef(params: { ref?: string }): string | undefined {
 	return trimOrUndefined(params.ref);
 }
 
-async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget): Promise<CaptureResult> {
+async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget, includeImage = true): Promise<CaptureResult> {
 	let target = targetOverride ?? await resolveCurrentTarget(signal);
 	target = await ensureTargetWindowId(target, signal);
-	const look = await performLook(target, { maxDimension, readText }, signal);
+	const look = await performLook(target, { maxDimension, readText, includeImage }, signal);
 	const outline = look.parsedOutline!;
 	const capture = captureForLook(look);
 
@@ -1370,11 +1372,17 @@ function normalizeActPath(path: DragParams["path"], look: LookResponse): Array<{
 	});
 }
 
+function clickShouldUseCoordinateGrounding(node: OutlineNode, action: HelperActAction): boolean {
+	if (action !== "click" && action !== "press") return false;
+	if (node.canPress || node.canFocus || node.canSetValue) return false;
+	return node.actions.every((candidate) => candidate === "AXShowMenu" || candidate === "AXScrollToVisible");
+}
+
 function actTargetFromParams(params: { ref?: string; x?: number; y?: number }, look: LookResponse, action: HelperActAction): HelperActTarget {
 	const ref = trimOrUndefined(params.ref);
 	if (ref) {
 		const node = outlineNodeByRef(ref);
-		if (node.wireRef && !node.pictureOnly) return { ref: node.wireRef };
+		if (node.wireRef && !node.pictureOnly && !clickShouldUseCoordinateGrounding(node, action)) return { ref: node.wireRef };
 		const point = outlineNodeCenter(node);
 		ensurePointIsInLookImage(point.x, point.y, look);
 		return point;
@@ -1880,7 +1888,8 @@ function sameRootIdentity(a: CurrentTarget, b: CurrentTarget): boolean {
 async function performObserve(params: ObserveParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails>> {
 	const mode = params.mode ?? "fused";
 	const image = params.image ?? (mode === "semantic" ? "never" : mode === "visual" ? "always" : "auto");
-	const readText = mode === "semantic" ? "never" : mode === "visual" ? "always" : "auto";
+	const defaultReadText = mode === "semantic" ? "never" : mode === "visual" ? "always" : "auto";
+	const readText = params.readText ?? defaultReadText;
 	runtimeState.currentImageMode = normalizeImageMode(image);
 	const selection = {
 		app: trimOrUndefined(params.app),
@@ -1890,7 +1899,8 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	const requestedTarget = selection.window
 		? await resolveTargetByWindowSelector((params.root ?? params.window)!, signal)
 		: await resolveTargetForObserve(selection, signal);
-	const captureResult = await captureCurrentTarget(signal, readText, normalizeImageMode(image) === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION, requestedTarget);
+	const imageMode = normalizeImageMode(image);
+	const captureResult = await captureCurrentTarget(signal, readText, imageMode === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION, requestedTarget, imageMode !== "never");
 	// Model @r refs are re-minted on re-resolution, so ref string equality
 	// alone false-positives as drift for the same root; compare stable
 	// identity against the resolved request too.
@@ -1900,7 +1910,7 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 		);
 	}
 	const summary = `Observed ${mode} ${captureResult.target.windowRef ? `${captureResult.target.windowRef} ` : ""}${captureResult.target.appName} — ${captureResult.target.windowTitle}. Returned the latest outline state.`;
-	return await buildToolResult("observe_ui", summary, captureResult, executionTrace("look", "stealth"), signal, normalizeImageMode(image));
+	return await buildToolResult("observe_ui", summary, captureResult, executionTrace("look", "stealth"), signal, imageMode);
 }
 
 function currentOutlineOrThrow(stateId?: string): Outline {
@@ -1909,21 +1919,45 @@ function currentOutlineOrThrow(stateId?: string): Outline {
 	return runtimeState.currentOutline;
 }
 
+function matchIsNonActionableStatic(match: OutlineSearchMatch): boolean {
+	const node = match.node;
+	return !node.canPress && !node.canFocus && !node.canSetValue && node.actions.length === 0 && !node.pictureOnly;
+}
+
+function shouldEscalateSearchOCR(matches: OutlineSearchMatch[], _text?: string): boolean {
+	return matches.length === 0 || matches.every(matchIsNonActionableStatic);
+}
+
 /** Pure outline query unless a window selector is supplied, in which case current target selection may change. */
 async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Promise<AgentToolResult<OutlineToolDetails>> {
 	await selectWindowIfProvided(((params as any).root ?? params.window), signal);
-	const outline = currentOutlineOrThrow(params.stateId);
+	let outline = currentOutlineOrThrow(params.stateId);
 	const text = trimOrUndefined(params.text);
 	const role = trimOrUndefined(params.role);
 	const action = trimOrUndefined(params.action);
 	const limit = Math.max(1, Math.min(50, Math.trunc(toFiniteNumber(params.limit, 12))));
-	const matches = searchOutline(outline, text, role, action, limit);
+	let matches = searchOutline(outline, text, role, action, limit);
+	let escalatedOCR = false;
+	const look = runtimeState.currentLook;
+	if (shouldEscalateSearchOCR(matches, text) && look && look.readText?.requested !== "never" && !look.readText?.executed && runtimeState.lastSearchOcrEscalatedLookId !== look.lookId) {
+		runtimeState.lastSearchOcrEscalatedLookId = look.lookId;
+		const currentTarget = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
+		// captureCurrentTarget adopts the new look/outline/capture into
+		// runtimeState, so refs in these matches stay actable. Keep the image
+		// payload: OCR-only matches are clicked by coordinate, and coordinate
+		// acts require the current look to be image-bearing.
+		const captureResult = await captureCurrentTarget(signal, "always", AUTO_IMAGE_MAX_DIMENSION, currentTarget);
+		outline = captureResult.outline;
+		matches = searchOutline(outline, text, role, action, limit);
+		escalatedOCR = true;
+	}
 	const detailMatches = matches.map((match) => ({ ...match, node: serializeOutlineNode(match.node) }));
 	const details: OutlineToolDetails = { tool: "search_ui", stateId: runtimeState.currentCapture?.stateId, lookId: outline.lookId, outline: serializeOutline(outline), matches: detailMatches, note: runtimeState.currentNote };
 	const lines = matches.map((match) => `${match.ref} ${match.role || "Unknown"} ${JSON.stringify(match.label || "(unlabeled)")}\n  path: ${match.path}`);
 	const noteHeader = renderNote(runtimeState.currentNote);
 	const noteText = noteHeader ? `${noteHeader}\n\n` : "";
-	return { content: [{ type: "text", text: `${noteText}Found ${matches.length} outline match${matches.length === 1 ? "" : "es"}.\n${lines.join("\n")}` }], details };
+	const escalationText = escalatedOCR ? " OCR text was escalated for this search after the cached outline had no matches." : "";
+	return { content: [{ type: "text", text: `${noteText}Found ${matches.length} outline match${matches.length === 1 ? "" : "es"}.${escalationText}\n${lines.join("\n")}` }], details };
 }
 
 /** Reads cached outline; truncated refs trigger a scoped look. */
@@ -2335,6 +2369,7 @@ export function reconstructStateFromBranch(ctx: ExtensionContext): void {
 	runtimeState.windowRefs.clear();
 	runtimeState.windowRefByIdentity.clear();
 	runtimeState.nextRootRefIndex = 1;
+	runtimeState.lastSearchOcrEscalatedLookId = undefined;
 
 	let restoredCurrent = false;
 	for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {

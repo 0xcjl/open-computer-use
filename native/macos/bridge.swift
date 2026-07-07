@@ -1190,6 +1190,7 @@ final class Bridge {
 		let windowRef = optionalStringArg(request, "windowRef")
 		let maxDimension = optionalIntArg(request, "maxDimension").map { max(1, $0) }
 		let readText = optionalStringArg(request, "readText") ?? "auto"
+		let includeImage = boolArg(request, "includeImage") ?? true
 		guard readText == "auto" || readText == "always" || readText == "never" else {
 			throw BridgeFailure(message: "readText must be auto, always, or never", code: "invalid_args")
 		}
@@ -1198,7 +1199,8 @@ final class Bridge {
 		let requestedRole = requestedRoot.flatMap { stringAttribute($0, attribute: kAXRoleAttribute as CFString) } ?? ""
 		let isMenuRoot = requestedRole == "AXMenu" || (windowRef?.hasPrefix("cgmenu:") == true)
 		let captureStart = Date()
-		let capture = try isMenuRoot ? nil : windowId.map { try captureWindow(windowId: $0) }
+		let shouldCapture = !isMenuRoot && (includeImage || readText == "always")
+		let capture = try shouldCapture ? windowId.map { try captureWindow(windowId: $0) } : nil
 		let captureMs = capture.map { _ in elapsedMs(captureStart) } ?? 0
 
 		let pid: Int32
@@ -1247,10 +1249,14 @@ final class Bridge {
 			imageWidth = outputImage.width
 			imageHeight = outputImage.height
 			transform = rectTransform(windowFrame: capture.frame, imageWidth: outputImage.width, imageHeight: outputImage.height)
-			guard let jpeg = jpegData(image: outputImage, quality: 0.8) else {
-				throw BridgeFailure(message: "Failed to encode look image as JPEG", code: "encoding_failed")
+			if includeImage {
+				guard let jpeg = jpegData(image: outputImage, quality: 0.8) else {
+					throw BridgeFailure(message: "Failed to encode look image as JPEG", code: "encoding_failed")
+				}
+				imagePayload = ["jpegBase64": jpeg.base64EncodedString(), "width": outputImage.width, "height": outputImage.height]
+			} else {
+				imagePayload = nil
 			}
-			imagePayload = ["jpegBase64": jpeg.base64EncodedString(), "width": outputImage.width, "height": outputImage.height]
 		} else {
 			imageWidth = max(1, Int(rootFrame.width))
 			imageHeight = max(1, Int(rootFrame.height))
@@ -1262,7 +1268,9 @@ final class Bridge {
 		let describeMs = elapsedMs(describeStart)
 
 		var readTextMs = 0
-		if let capture, readText == "always" || (readText == "auto" && sparseDescription(outline, imageWidth: imageWidth, imageHeight: imageHeight)) {
+		var readTextExecuted = false
+		if let capture, readText == "always" {
+			readTextExecuted = true
 			let textStart = Date()
 			let boxes = try recognizeText(in: capture.image, outputWidth: imageWidth, outputHeight: imageHeight)
 			attachOCR(boxes, to: outline)
@@ -1293,6 +1301,7 @@ final class Bridge {
 			],
 			"outline": outline.payload(),
 			"timings": ["captureMs": captureMs, "describeMs": describeMs, "readTextMs": readTextMs],
+			"readText": ["requested": readText, "executed": readTextExecuted],
 		]
 		if let imagePayload { response["image"] = imagePayload }
 		return response
@@ -1437,23 +1446,6 @@ final class Bridge {
 		return !visible.contains { sameElement($0, child) }
 	}
 
-	private func sparseDescription(_ root: LookNode, imageWidth: Int, imageHeight: Int) -> Bool {
-		let imageRect = CGRect(x: 0, y: 0, width: imageWidth, height: imageHeight)
-		var count = 0
-		var queue = [root]
-		var index = 0
-		while index < queue.count {
-			let node = queue[index]
-			index += 1
-			if (!node.title.isEmpty || !node.description.isEmpty || !node.value.isEmpty) && node.rect.intersects(imageRect) {
-				count += 1
-				if count >= 3 { return false }
-			}
-			queue.append(contentsOf: node.children)
-		}
-		return true
-	}
-
 	private func recognizeText(in image: CGImage, outputWidth: Int, outputHeight: Int) throws -> [OCRBox] {
 		let semaphore = DispatchSemaphore(value: 0)
 		let recognized = Box<[OCRBox]>([])
@@ -1490,6 +1482,7 @@ final class Bridge {
 	private func attachOCR(_ boxes: [OCRBox], to root: LookNode) {
 		var pictureOnlyIndex = 0
 		for box in boxes {
+			if ocrBoxDuplicatesAXLabel(box, in: root) { continue }
 			let center = CGPoint(x: box.rect.midX, y: box.rect.midY)
 			if let node = deepestNode(containing: center, in: root) {
 				node.text.append(["string": box.string, "confidence": box.confidence, "rect": ["x": box.rect.origin.x, "y": box.rect.origin.y, "w": box.rect.width, "h": box.rect.height]])
@@ -1499,6 +1492,23 @@ final class Bridge {
 				parent.children.append(LookNode(element: nil, ref: "pic_\(pictureOnlyIndex)", role: "AXImage", subrole: "", identifier: "", title: box.string, description: "", value: "", actions: [], canPress: false, canFocus: false, canSetValue: false, canScroll: false, canIncrement: false, canDecrement: false, isTextInput: false, rect: box.rect, pictureOnly: true))
 			}
 		}
+	}
+
+	private func ocrBoxDuplicatesAXLabel(_ box: OCRBox, in root: LookNode) -> Bool {
+		let boxLabel = normalizedLabel(box.string)
+		if boxLabel.isEmpty { return true }
+		var queue = [root]
+		var index = 0
+		while index < queue.count {
+			let node = queue[index]
+			index += 1
+			if !node.pictureOnly, node.rect.intersects(box.rect) {
+				let fields = [node.title, node.value, node.description]
+				if fields.contains(where: { normalizedLabel($0) == boxLabel }) { return true }
+			}
+			queue.append(contentsOf: node.children)
+		}
+		return false
 	}
 
 	private func deepestNode(containing point: CGPoint, in root: LookNode) -> LookNode? {

@@ -44,6 +44,8 @@ Some outline nodes are marked `pictureOnly`. These represent visual evidence wit
 | `fused` | Default. Include visual evidence when it is useful. |
 | `visual` | The app is custom drawn or the accessibility tree is sparse. |
 
+`readText` can be set independently of `mode`/`image` (`auto` | `always` | `never`). `always` runs OCR and fuses the recognized text into the outline even when no image is attached; `auto` skips OCR at observe time — if a later `search_ui` finds no actionable match, the harness re-captures with OCR once and searches again, so visual-only text is found without an extra round trip.
+
 Images are optional. Sheet/dialog roots may be semantic-only; coordinate actions clearly reject image-less looks.
 
 ## Acting

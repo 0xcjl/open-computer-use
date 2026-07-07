@@ -77,6 +77,7 @@ export interface LookResponse {
 	image?: LookImage;
 	outline: OutlineNode;
 	timings: Record<string, number>;
+	readText?: { requested?: "auto" | "always" | "never"; executed: boolean };
 	parsedOutline?: Outline;
 }
 
@@ -195,6 +196,8 @@ export function parseLookResponse(raw: unknown): LookResponse {
 	const window = isRecord(record.window) ? record.window : {};
 	const metadata = isRecord(window.metadata) ? window.metadata : undefined;
 	const outline = buildOutline(toString(record.lookId), parseNode(record.outline));
+	const readText = isRecord(record.readText) ? record.readText : undefined;
+	const requestedReadText = readText?.requested === "auto" || readText?.requested === "always" || readText?.requested === "never" ? readText.requested : undefined;
 	const look: LookResponse = {
 		lookId: toString(record.lookId),
 		capturedAt: toNumber(record.capturedAt, Date.now() / 1000),
@@ -216,6 +219,7 @@ export function parseLookResponse(raw: unknown): LookResponse {
 		} : undefined,
 		outline: outline.root,
 		timings: isRecord(record.timings) ? Object.fromEntries(Object.entries(record.timings).map(([key, value]) => [key, toNumber(value)])) : {},
+		readText: readText ? { requested: requestedReadText, executed: toBoolean(readText.executed) } : undefined,
 		parsedOutline: outline,
 	};
 	if (!look.lookId) throw new Error("Helper returned a look without lookId.");
@@ -399,7 +403,10 @@ export function searchOutline(outline: Outline, text?: string, role?: string, ac
 	const matches: OutlineSearchMatch[] = [];
 	for (const node of outline.nodes) {
 		const label = outlineNodeLabel(node);
-		const haystack = [label, node.role, node.subrole, node.identifier, ...node.text.map((item) => item.string)].join(" ").toLowerCase();
+		// outlineNodeLabel short-circuits (title || description || value), so
+		// list the fields individually too or a titled node's value/description
+		// can never match.
+		const haystack = [label, node.role, node.subrole, node.identifier, node.title, node.description, node.value, ...node.text.map((item) => item.string)].join(" ").toLowerCase();
 		if (query && !haystack.includes(query)) continue;
 		if (roleQuery && node.role !== roleQuery) continue;
 		if (actionQuery && !actionMatches(node, actionQuery)) continue;

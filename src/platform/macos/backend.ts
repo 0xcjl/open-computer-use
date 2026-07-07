@@ -98,6 +98,7 @@ export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRo
 			maxDimension: request.maxDimension,
 			readText: request.readText,
 			scopeRef: request.scopeRef,
+			includeImage: request.includeImage,
 		}, options));
 	},
 

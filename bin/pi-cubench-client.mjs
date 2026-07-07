@@ -27,9 +27,12 @@ const ctx = {
 
 try {
 	await observe();
-	const row = await searchExact("invoice_123.pdf") ?? await searchFirst({ text: "invoice_123.pdf" });
-	if (!row) throw new Error("Could not find target filename invoice_123.pdf");
-	await act({ action: "click", ref: row.ref });
+	const row = await findTargetFilename("invoice_123.pdf");
+	if (!row) throw new Error("Could not find exact target filename invoice_123.pdf");
+	const clickResult = await clickMatch(row);
+	if (clickResult.details?.execution?.outcome === "didnt") {
+		throw new Error(`Clicking target row did not take effect: ${clickResult.details?.execution?.error ?? "no selection/action evidence"}`);
+	}
 
 	let field = await searchFirst({ text: "New file name" }) ?? await searchFirst({ role: "AXTextField" }) ?? await searchFirst({ role: "AXTextArea" });
 	if (field) {
@@ -54,7 +57,7 @@ try {
 		await act({ action: "click", ref: modal.ref });
 	}
 
-	await waitFor({ text: "paid_invoice_123.pdf", timeoutMs: 5_000 }).catch(() => undefined);
+	await waitFor({ text: "paid_invoice_123.pdf", timeoutMs: 5_000 });
 	console.log(JSON.stringify(result("completed", "Done")));
 } catch (error) {
 	console.log(JSON.stringify(result("failed", error instanceof Error ? error.message : String(error))));
@@ -75,14 +78,53 @@ async function observe() {
 	});
 }
 
+async function findTargetFilename(text) {
+	return await bestExactTarget(text);
+}
+
+async function bestExactTarget(text) {
+	const result = await tool(executeSearchUi, { text, limit: 50 });
+	const matches = result.details?.matches ?? [];
+	return matches
+		.filter((match) => isExactMatch(match, text))
+		.sort((a, b) => scoreTarget(b) - scoreTarget(a))[0];
+}
+
+function isExactMatch(match, text) {
+	const normalizedTarget = normalizeText(text);
+	const node = match.node ?? {};
+	const candidates = [match.label, node.title, node.value, node.description, ...(node.text ?? []).map((item) => item.string)];
+	return candidates.some((candidate) => normalizeText(candidate) === normalizedTarget);
+}
+
+function scoreTarget(match) {
+	const node = match.node ?? {};
+	let score = 0;
+	if (node.pictureOnly) score += 8;
+	if (node.canPress || node.canFocus || node.canSetValue || (node.actions ?? []).length) score += 4;
+	if (["AXRow", "AXCell", "AXStaticText", "AXImage"].includes(node.role)) score += 2;
+	return score;
+}
+
+async function clickMatch(match) {
+	const node = match.node ?? {};
+	if (match.ref) return await act({ action: "click", ref: match.ref });
+	const rect = node.rect;
+	if (rect) return await act({ action: "click", x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 });
+	throw new Error(`Target match ${match.label ?? match.ref} had neither ref nor rect.`);
+}
+
+function normalizeText(value) {
+	return String(value ?? "").toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+}
+
 async function searchFirst(params) {
 	const result = await tool(executeSearchUi, { ...params, limit: 20 });
 	return result.details?.matches?.[0];
 }
 
 async function searchExact(text) {
-	const result = await tool(executeSearchUi, { text, limit: 50 });
-	return result.details?.matches?.find((match) => match.label === text || match.node?.title === text || match.node?.value === text);
+	return await bestExactTarget(text);
 }
 
 async function waitFor(params) {
