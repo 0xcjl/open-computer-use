@@ -15,6 +15,7 @@ import {
 	executeSearchUi,
 	executeWaitFor,
 	reconstructStateFromBranch,
+	shutdownComputerUseSession,
 } from "../src/bridge.ts";
 import { getLoadedComputerUseConfig, loadComputerUseConfig } from "../src/config.ts";
 
@@ -225,5 +226,9 @@ export default function computerUseExtension(pi: ExtensionAPI): void {
 		reconstructStateFromBranch(ctx);
 		if (!ctx.hasUI) return;
 		try { await ensureComputerUseSetup(ctx); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning"); }
+	});
+
+	pi.on("session_shutdown", async () => {
+		await shutdownComputerUseSession();
 	});
 }

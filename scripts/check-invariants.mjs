@@ -114,7 +114,7 @@ check("INV-6 static note is derived and disposable", () => {
 		assert(/^note|^render/.test(match[1]), `src/note.ts exports non-note/render function ${match[1]}`);
 	}
 	assert(!/export\s+(let|const|var)\s+/.test(noteTs), "src/note.ts exports mutable or module state");
-	const allowed = new Set(["captureCurrentTarget", "runActionTool", "reconstructStateFromBranch"]);
+	const allowed = new Set(["captureCurrentTarget", "runActionTool", "reconstructStateFromBranch", "shutdownComputerUseSession"]);
 	for (const match of ts.matchAll(/runtimeState\.currentNote\s*=/g)) {
 		const fn = enclosingFunctionName(ts, match.index ?? 0);
 		assert(allowed.has(fn), `runtimeState.currentNote assigned in ${fn}`);

@@ -85,6 +85,7 @@ async function ensureReady(_ctx: unknown, state: PlatformReadyState, signal?: Ab
 
 export const windowsBackend: ComputerUsePlatformBackend = {
 	name: "windows",
+	shutdown(): void { windowsHelper.dispose(); },
 	ensureReady,
 	async listApps(signal?: AbortSignal): Promise<PlatformApp[]> {
 		return appsFromRoots(parseRoots(await windowsHelper.command("listRoots", {}, { signal })));

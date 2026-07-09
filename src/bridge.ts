@@ -6,7 +6,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { cdpEvaluateForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeForContext, listCdpPageContexts, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
+import { cdpEvaluateForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isStrictAxMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
 import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, restoreOutline, searchOutline, serializeOutline, serializeOutlineNode, type LookResponse, type Outline, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode } from "./outline.ts";
@@ -287,6 +287,8 @@ interface RuntimeState {
 	allowNextTypeTextAxReplacement?: boolean;
 	pendingBrowserAddress?: PendingBrowserAddress;
 	managedBrowser?: ChildProcess;
+	managedBrowserCdpPort?: string;
+	previousCdpPort?: string;
 	queueTail: Promise<void>;
 	permissionStatus?: PermissionStatus;
 	helperDiagnostics?: PlatformDiagnostics;
@@ -326,6 +328,44 @@ const runtimeState: RuntimeState = {
 	windowWriteQueues: new Map(),
 	nextRootRefIndex: 1,
 };
+
+/** Release handles and state owned by the current Pi session. */
+export async function shutdownComputerUseSession(): Promise<void> {
+	disconnectCdp();
+
+	const managedBrowser = runtimeState.managedBrowser;
+	runtimeState.managedBrowser = undefined;
+	if (managedBrowser) {
+		managedBrowser.kill("SIGTERM");
+		managedBrowser.unref();
+	}
+	if (runtimeState.managedBrowserCdpPort && process.env.PI_COMPUTER_USE_CDP_PORT === runtimeState.managedBrowserCdpPort) {
+		if (runtimeState.previousCdpPort === undefined) delete process.env.PI_COMPUTER_USE_CDP_PORT;
+		else process.env.PI_COMPUTER_USE_CDP_PORT = runtimeState.previousCdpPort;
+	}
+	runtimeState.managedBrowserCdpPort = undefined;
+	runtimeState.previousCdpPort = undefined;
+
+	runtimeState.currentTarget = undefined;
+	runtimeState.currentCapture = undefined;
+	runtimeState.currentStateTarget = undefined;
+	runtimeState.currentImageMode = undefined;
+	runtimeState.currentLook = undefined;
+	runtimeState.currentOutline = undefined;
+	runtimeState.currentNote = undefined;
+	runtimeState.browserSnapshots.clear();
+	runtimeState.windowRefs.clear();
+	runtimeState.windowRefByIdentity.clear();
+	runtimeState.windowWriteQueues.clear();
+	runtimeState.nextRootRefIndex = 1;
+	runtimeState.allowNextTypeTextAxReplacement = false;
+	runtimeState.pendingBrowserAddress = undefined;
+	runtimeState.permissionStatus = undefined;
+	runtimeState.helperDiagnostics = undefined;
+	runtimeState.lastPermissionCheckAt = 0;
+	runtimeState.lastSearchOcrEscalatedLookId = undefined;
+	await currentPlatformBackend.shutdown?.();
+}
 
 function normalizeError(error: unknown): Error {
 	return error instanceof Error ? error : new Error(String(error));
@@ -2214,6 +2254,7 @@ async function performLaunchBrowserContext(params: LaunchBrowserContextParams, s
 	const port = Number.isInteger(params.port) && params.port! > 0 ? Math.trunc(params.port!) : await freeTcpPort();
 	const url = trimOrUndefined(params.url) ?? "about:blank";
 	const profileDir = path.join(os.tmpdir(), `pi-${browser}-cdp-${port}`);
+	disconnectCdp();
 	runtimeState.managedBrowser?.kill("SIGTERM");
 	const args = [
 		`--remote-debugging-port=${port}`,
@@ -2222,9 +2263,27 @@ async function performLaunchBrowserContext(params: LaunchBrowserContextParams, s
 		"--no-default-browser-check",
 		url,
 	];
-	runtimeState.managedBrowser = spawn(executable, args, { stdio: "ignore", detached: false });
+	if (runtimeState.previousCdpPort === undefined && runtimeState.managedBrowserCdpPort === undefined) {
+		runtimeState.previousCdpPort = process.env.PI_COMPUTER_USE_CDP_PORT;
+	}
+	const managedBrowser = spawn(executable, args, { stdio: "ignore", detached: false });
+	managedBrowser.unref();
+	runtimeState.managedBrowser = managedBrowser;
+	runtimeState.managedBrowserCdpPort = String(port);
 	process.env.PI_COMPUTER_USE_CDP_PORT = String(port);
-	await waitForCdpPort(port, signal);
+	try {
+		await waitForCdpPort(port, signal);
+	} catch (error) {
+		if (runtimeState.managedBrowser === managedBrowser) {
+			runtimeState.managedBrowser = undefined;
+			managedBrowser.kill("SIGTERM");
+			if (runtimeState.previousCdpPort === undefined) delete process.env.PI_COMPUTER_USE_CDP_PORT;
+			else process.env.PI_COMPUTER_USE_CDP_PORT = runtimeState.previousCdpPort;
+			runtimeState.managedBrowserCdpPort = undefined;
+			runtimeState.previousCdpPort = undefined;
+		}
+		throw error;
+	}
 	const contextsResult = await performListContexts(signal);
 	const contexts = contextsResult.details.contexts.filter((context) => context.kind === "browser_page");
 	const details: LaunchBrowserContextDetails = { tool: "launch_browser_context", browser, port, url, contexts };

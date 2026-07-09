@@ -110,6 +110,9 @@ export class CdpTab {
 	}
 
 	close(): void {
+		this.loadFired?.();
+		this.loadFired = undefined;
+		this.rejectAllPending(new Error("CDP connection closed."));
 		try {
 			this.ws.close();
 		} catch {
@@ -270,6 +273,14 @@ export class CdpTab {
 
 let connectedTab: CdpTab | undefined;
 let lastConnectFailureAt = 0;
+
+/** Close session-owned CDP state without affecting the browser process. */
+export function disconnectCdp(): void {
+	const tab = connectedTab;
+	connectedTab = undefined;
+	lastConnectFailureAt = 0;
+	tab?.close();
+}
 
 export function cdpEnabled(): boolean {
 	const rawPort = process.env.PI_COMPUTER_USE_CDP_PORT ?? "";

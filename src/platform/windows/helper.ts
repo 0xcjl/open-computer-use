@@ -52,6 +52,25 @@ export class WindowsHelperClient {
 	private buffer = "";
 	private pending = new Map<string, Pending<unknown>>();
 
+	dispose(): void {
+		const error = new Error("Windows helper closed because the Pi session ended.");
+		for (const pending of this.pending.values()) {
+			clearTimeout(pending.timer);
+			pending.reject(error);
+		}
+		this.pending.clear();
+		this.buffer = "";
+
+		const child = this.child;
+		this.child = undefined;
+		if (!child) return;
+		child.stdin.destroy();
+		child.stdout.destroy();
+		child.stderr.destroy();
+		child.kill("SIGTERM");
+		child.unref();
+	}
+
 	async ensureInstalled(signal?: AbortSignal): Promise<void> {
 		if ((await isExecutable(WINDOWS_HELPER_PATH)) && this.installChecked) return;
 		await runProcess(process.execPath, [SETUP_HELPER_SCRIPT, "--platform", "windows", "--runtime"], HELPER_SETUP_TIMEOUT_MS, signal, { ...process.env, ELECTRON_RUN_AS_NODE: "1" });
