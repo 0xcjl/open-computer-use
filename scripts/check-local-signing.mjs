@@ -26,6 +26,10 @@ assert.equal(shouldResetTccForSigningChange("cert:aaaa", "cert:aaaa"), false);
 assert.equal(shouldResetTccForSigningChange(undefined, "cert:aaaa"), false);
 assert.equal(shouldResetTccForSigningChange("unknown", "cert:aaaa"), false);
 
+const permissionCopy = await fs.readFile(new URL("../src/platform/macos/permissions.ts", import.meta.url), "utf8");
+assert.match(permissionCopy, /macOS invalidated the old grants because/);
+assert.match(permissionCopy, /switch it off and on again/);
+
 const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-computer-use-signing-test-"));
 const lockPath = path.join(tempDir, "identity.lock");
 let identity;

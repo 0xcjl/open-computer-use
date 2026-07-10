@@ -8,6 +8,11 @@ const GRANT_INSTRUCTIONS =
 	"Grant Accessibility and Screen Recording to pi-computer-use.app in System Settings → Privacy & Security. " +
 	"Screen Recording lets the agent see the window; Accessibility lets it interact with the window.";
 
+const SIGNING_MIGRATION_WARNING =
+	"If these permissions were enabled before this install/update, macOS invalidated the old grants because " +
+	"pi-computer-use.app was re-signed. Re-enable both toggles for the newly signed helper. " +
+	"If a toggle is already on, switch it off and on again.";
+
 const macosPermissionKinds = [
 	{ kind: "accessibility" as const, openOption: "Open Accessibility Settings (missing)" },
 	{ kind: "screenRecording" as const, openOption: "Open Screen Recording Settings (missing)" },
@@ -35,12 +40,14 @@ function permissionPrompt(status: PermissionStatus, helperPath: string, hint?: s
 		`Helper: pi-computer-use.app (${helperPath})`,
 		hint,
 		"",
+		`Important: ${SIGNING_MIGRATION_WARNING}`,
+		"",
 		"pi-computer-use.app is already listed in the pane(s) — enable its toggle, then choose Recheck.",
 	].filter(Boolean).join("\n");
 }
 
 function missingPermissionMessage(kinds: PermissionKind[]): string {
-	return `Still missing after restart: ${kinds.join(" and ")}.`;
+	return `Still missing after restart: ${kinds.join(" and ")}. ${SIGNING_MIGRATION_WARNING} Then choose Recheck again.`;
 }
 
 async function checkPermissions(signal?: AbortSignal): Promise<PermissionStatus> {
