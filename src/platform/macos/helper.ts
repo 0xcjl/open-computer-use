@@ -245,10 +245,18 @@ export class MacosHelperClient {
 	}
 
 	async ensureProtocol(signal?: AbortSignal): Promise<PlatformDiagnostics> {
-		const diagnostics = await this.diagnosticsCommand(signal);
+		let diagnostics = await this.diagnosticsCommand(signal);
+		if (diagnostics.protocolVersion === HELPER_PROTOCOL_VERSION) return diagnostics;
+
+		// The helper daemon outlives Pi, so restarting/reloading Pi alone does not
+		// replace a daemon that is still serving the previous installed binary.
+		// Stop it through the backwards-compatible command channel and relaunch
+		// the app that ensureInstalled() has just synced to /Applications.
+		await this.restart(signal);
+		diagnostics = await this.diagnosticsCommand(signal);
 		if (diagnostics.protocolVersion !== HELPER_PROTOCOL_VERSION) {
 			this.daemonAvailable = false;
-			throw new Error(`pi-computer-use helper protocol mismatch: expected ${HELPER_PROTOCOL_VERSION}, got ${diagnostics.protocolVersion}. Restart Pi so the updated helper can be loaded.`);
+			throw new Error(`pi-computer-use helper protocol mismatch after relaunch: expected ${HELPER_PROTOCOL_VERSION}, got ${diagnostics.protocolVersion}. Reinstall or rebuild the helper app at ${HELPER_APP_PATH}.`);
 		}
 		return diagnostics;
 	}
