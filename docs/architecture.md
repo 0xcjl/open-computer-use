@@ -1,72 +1,129 @@
 # Architecture
 
-`pi-computer-use` gives Pi agents a small, inspectable interface for desktop GUI control on macOS and Windows.
-
-The core loop is:
+`pi-computer-use` exposes one state-scoped interface for desktop and browser UI:
 
 ```text
-find roots → observe root → search/expand/inspect → act → refresh state
+find roots → observe one root → search/expand/inspect its state → act from that state
 ```
 
-A root is a top-level controllable UI surface. The platform seam guarantees only the split between ordinary windows and transients; specific root kinds such as sheet, dialog, popover, or menu are best-effort presentation hints and never drive shared behavior. Public root refs use `@rN`; element refs inside the current observation still use `@eN`.
+The agent still sees a multi-root forest. `find_roots` returns stable root refs (`@rN`) for desktop windows, transient surfaces, and CDP pages. Observing one root produces an immutable element tree whose refs (`@eN`) belong only to that returned `stateId`. Progressive disclosure is unchanged: the first outline is folded, while `search_ui`, `expand_ui`, and `inspect_ui` query the full stored tree.
 
-## Layers
+## Runtime model
 
-| Layer | Role |
-| --- | --- |
-| Pi extension | Registers the public tools and schemas. |
-| TypeScript bridge | Manages state, refs, browser/CDP support, notes, outline folding, and tool results. |
-| Platform backend | Exposes a generic root/observe/act contract to shared orchestration. |
-| Native platform backend/helper | Performs accessibility inspection, root enumeration, window capture, input dispatch, permission probes when the OS requires them, and helper-side action verification. |
-| Platform permissions | macOS enforces Accessibility and Screen Recording. Windows support uses the active desktop session and Windows accessibility/input APIs. |
+```mermaid
+flowchart TB
+    A["Agent tool calls<br/>Pi may issue them concurrently"] --> C["State-scoped contract<br/>root @r / stateId / element @e"]
+    C --> Q{"Cached or live?"}
+    Q -->|"cached search / expand / inspect"| S["Bounded immutable state store"]
+    Q -->|"observe / act / live read"| R["Resource scheduler"]
+    R --> D1["desktop-pid:123 lane"]
+    R --> D2["desktop-pid:456 lane"]
+    R --> B1["cdp:page-A lane"]
+    D1 --> P["Platform-neutral backend"]
+    D2 --> P
+    B1 --> Cdp["Target-keyed CDP connections"]
+    P --> M["macOS AX/capture helper"]
+    P --> W["Windows UIA/input helper"]
+    M --> O["OS UI resources"]
+    W --> O
+    Cdp --> O
+```
 
-## Observation
+There is no session-wide current UI. Every call hydrates request-local state from `stateId`; unrelated calls cannot overwrite one another. Stored observations are immutable and bounded, so old refs either resolve to their exact observation or fail clearly after eviction.
 
-`observe_ui` asks the backend for one atomic look at a root. A look includes:
+The scheduler serializes live operations only when they address the same physical resource. Different desktop processes and different CDP targets can run concurrently. Cached outline queries bypass it entirely. Every resource has a monotonically increasing epoch. A mutating call must present the epoch captured by its state; if another write won the race, the stale call is rejected before dispatch.
 
-- platform-neutral root identity and facts
-- platform accessibility API-derived UI structure (AX on macOS, UIA on Windows)
-- optional image evidence for image-bearing roots
-- text boxes when OCR/vision is needed
-- timing and capture metadata
+Desktop scheduling is conservatively keyed by process rather than window because accessibility focus, menus, and physical input can cross window boundaries inside an app. CDP scheduling is keyed by page target. Global physical input remains mutex-protected in the native helper; semantic AX/UIA work can overlap where the platform permits it.
 
-The bridge converts that look into a folded outline. Every visible outline node gets a stable tool ref such as `@e12` for the current state. Large subtrees are summarized until the agent calls `expand_ui` or `search_ui`.
+## Observation and progressive disclosure
 
-Transient roots may be semantic-only when the OS does not expose a capturable window image. Coordinate actions clearly reject those looks; use semantic `@e` refs instead.
+`observe_ui` asks the selected backend for one look. A desktop look combines root identity, accessibility structure, optional image evidence, OCR boxes when required, and capture metadata. A browser look converts the CDP accessibility tree into the same serialized outline shape.
 
-Modality is a platform-reported fact. Backends fold platform-specific modal/dialog/sheet signals into `isModal`; shared scoring and displacement consume only that fact.
+The bridge stores the complete observation and returns a folded rendering. The state owns its refs:
 
-## Acting
+```text
+@r3 browser page
+  state A (epoch 4)
+    @e1 document
+    @e7 button
 
-`act_ui` performs one action transaction. The backend/helper owns the actual input decision:
+@r8 desktop window
+  state B (epoch 2)
+    @e1 application
+    @e12 text field
+```
 
-1. resolve the target ref or coordinate
-2. ground it to a platform accessibility element or coordinates
-3. preflight permissions and target state
-4. execute the action
-5. verify what happened when possible
-6. return `worked`, `didnt`, or `unknown` with evidence and any shallow `rootDelta`
+`search_ui` and ordinary inspection are pure cached queries. A live escalation such as OCR or a refreshed truncated region is epoch-checked and resource-scheduled. It cannot silently graft data across a concurrent mutation.
 
-Refs from `observe_ui`, `search_ui`, and `expand_ui` are preferred. Coordinate actions are available as fallback, but they are tied to the latest observed image-bearing root. If a root appears in a delta, agent guidance is uniform across platforms: observe it.
+## Acting and batching
 
-`deltaSource` is a free-form diagnostic string naming the backend's delta mechanism. It is not part of the behavioral contract; shared code only treats its presence as evidence that the backend already awaited UI quiescence.
+`act_ui` is a transaction:
 
-## Running note
+```ts
+act_ui({
+  stateId,
+  actions: [
+    { action: "setText", ref: "@e12", text: "hello" },
+    { action: "press", ref: "@e18" },
+  ],
+})
+```
 
-The bridge maintains a short disposable note per root. It summarizes the latest useful UI state and recent action outcomes so the next tool result has continuity without replaying the whole outline.
+Transactions may include a semantic postcondition:
 
-The note is derived state. If it is wrong or stale, another look replaces it.
+```ts
+act_ui({
+  stateId,
+  actions: [{ action: "press", ref: "@e9" }],
+  expect: { text: "Saved", timeoutMs: 3000 }
+})
+```
+
+With a postcondition, the backend waits for the requested text or role to
+appear (or disappear with `gone: true`) before reporting success. It records
+whether the condition was newly verified, already present before delivery, or
+failed. A failed postcondition changes the execution outcome to `didnt`; event
+delivery alone is never treated as semantic success.
+
+One action is represented by an array of length one. A multi-action transaction is appropriate only when no intermediate observation is needed. The runtime validates one base state, acquires one resource lane, and sends the steps as one native helper transaction. The helper captures one pre-transaction root baseline, executes and verifies steps in order, and stops on the first failed or invalidated step. Partial results include `stoppedAt`, so callers know the exact checked boundary and must re-observe before continuing. The helper performs one final root-delta settle and the bridge produces one final observation. There is no alternate sequential protocol. This is not a mechanism for parallel actions within one UI resource.
+
+The backend/helper still owns grounding, preflight, execution, and verification. Raw coordinates are tied to the image-bearing state that produced them. A semantic ref may use its native accessibility frame without screenshot pixels; the helper still hit-tests that frame immediately before foreground delivery. Web-backed editable controls use atomic keyboard events and web-backed buttons use pointer events so application state receives normal input events rather than only a changed AX value. A helper result reports `worked`, `didnt`, or `unknown`, including evidence and shallow root changes where available.
+
+Every action attempts verified CDP or platform-accessibility semantics first. With `headless: true`, that background boundary is strict: Pi must never activate or raise an application, change the user's focused window, move the global cursor, or post raw input. With `headless: false` (the default), a typed `foreground_required` failure may start a separate foreground delivery attempt for the same action. Ambiguous or `unknown` background results are never replayed.
+
+The agent-facing `act_ui.headless` flag determines whether foreground fallback is prohibited. When a semantic pattern is absent, or when an accepted accessibility value write is verified not to have taken effect, the backend fails with `foreground_required` before physical input. Fallback-capable multi-action calls execute one checked action at a time so a completed background prefix is never replayed; strict-headless calls retain native transactional batching.
 
 ## Browser support
 
-Browser roots can be controlled through the same desktop tools. When CDP is enabled, browser-specific tools can also navigate, evaluate JavaScript, and inspect browser contexts directly.
+Browser pages are roots, not a second agent-facing context hierarchy. `launch_browser` returns browser-page `@r` refs; `observe_ui` returns their normal outline and `stateId`. `read_text`, `wait_for`, `act_ui`, `navigate_browser`, and `evaluate_browser` derive the CDP target from that state. Internal CDP target identifiers never need to be copied between public tools.
+
+## Native transports
+
+The macOS socket server and Windows line protocol accept multiple in-flight requests and correlate responses by request id. macOS protects shared AX ref/look stores and the root-event sequence; Windows uses a fixed worker pool and initializes UIA per worker thread. Both platforms keep eight immutable native look records and serialize global physical input. Target focus, bounded occlusion preflight, and HID delivery share that same critical section; another worker cannot change the foreground between validation and delivery. UIA-only Windows batches do not acquire the global physical-input lock, while any batch that may fall back to pointer or keyboard delivery holds it for the complete transaction.
+
+Windows UIA extraction is bounded. When the native limit omits descendants, the nearest retained ancestors are marked `truncated`; `expand_ui` performs a scoped look and the helper carries forward the untouched refs into the new immutable look record. Windows root deltas combine an event journal with authoritative before/after snapshots. `SetWinEventHook` accelerates settling and retains short-lived root transitions, while snapshots remain the source of truth for persistent state.
+
+## Preventing platform drift
+
+Platform parity is defined by invariants, not matching source structure. Every helper reports an `architectureVersion` and the invariant set it implements. Startup fails closed if either helper omits a required invariant. The TypeScript backend interface and conformance check additionally require both platforms to expose the same observation, text ownership, batching, and lifecycle operations.
+
+Changes to a native backend should therefore include three layers of evidence:
+
+1. shared contract tests for request and response semantics;
+2. target-native compilation and deterministic native unit tests;
+3. the same black-box Cubench properties on an interactive host for that platform.
+
+OS-specific mechanisms can differ—AX and ScreenCaptureKit on macOS, UIA and Windows capture/input APIs on Windows—but state ownership, bounds, progressive disclosure, transaction boundaries, and honest outcomes may not.
 
 ## Design constraints
 
+- Preserve the multi-root forest and progressive disclosure.
+- Make state ownership explicit; never depend on a mutable session-wide current UI.
+- Reject stale writes before dispatch using resource epochs.
+- Serialize by physical resource, not by tool name or whole session.
 - Prefer platform semantics over image-only guessing.
-- Keep the default observation compact.
-- Expand locally instead of dumping entire trees.
-- Let the backend/helper own action execution and verification.
-- Keep the seam platform-neutral: platform mechanisms belong in backend internals or free-form diagnostics, not shared contract types.
-- Keep stale refs and coordinates scoped to the state that produced them.
-- Avoid compatibility shims for removed public tools.
+- Keep observation compact and expand locally.
+- Let the backend/helper own action grounding and verification.
+- Keep platform mechanisms behind the platform-neutral seam.
+- Treat batching as one-resource transaction amortization, not a separate execution architecture.
+- Fail closed when an action outcome is uncertain; a later call must observe again.

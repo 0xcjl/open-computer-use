@@ -63,13 +63,16 @@ function parseRoots(result: unknown): PlatformRoot[] {
 	});
 }
 
-export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRoots" | "getFrontmost" | "focusWindow" | "observe" | "act" | "readText" | "waitFor"> = {
+export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRoots" | "getFrontmost" | "focusWindow" | "observe" | "act" | "actBatch" | "readText" | "waitFor"> = {
 	async listApps(signal?: AbortSignal): Promise<PlatformApp[]> {
 		return parseApps(await macosHelper.command<unknown>("listApps", {}, { signal }));
 	},
 
 	async listRoots(query: PlatformRootQuery, signal?: AbortSignal): Promise<PlatformRoot[]> {
-		return parseRoots(await macosHelper.command<unknown>("listRoots", Number.isFinite(query.pid) ? { pid: Math.trunc(query.pid!) } : {}, { signal }));
+		return parseRoots(await macosHelper.command<unknown>("listRoots", {
+			...(Number.isFinite(query.pid) ? { pid: Math.trunc(query.pid!) } : {}),
+			...(query.title?.trim() ? { title: query.title.trim() } : {}),
+		}, { signal }));
 	},
 
 	async getFrontmost(signal?: AbortSignal): Promise<PlatformFrontmostResult> {
@@ -93,6 +96,7 @@ export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRo
 
 	async observe(request: PlatformObserveRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<LookResponse> {
 		return parseLookResponse(await macosHelper.command("look", {
+			baseLookId: request.baseLookId,
 			windowId: request.target.windowId,
 			windowRef: request.target.rootRef,
 			maxDimension: request.maxDimension,
@@ -104,6 +108,10 @@ export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRo
 
 	async act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
 		return await macosHelper.command<HelperActResult>("act", { ...request }, options);
+	},
+
+	async actBatch(requests: PlatformActRequest[], options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
+		return await macosHelper.command<HelperActResult>("actBatch", { actions: requests }, options);
 	},
 
 	async readText(args: PlatformReadTextRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformReadTextResponse> {

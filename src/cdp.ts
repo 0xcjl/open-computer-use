@@ -6,6 +6,9 @@
 // and uncaught exceptions are attached to tool results. Everything else
 // keeps the AX/CGEvent path, so with the env var unset this module is inert.
 
+import { randomUUID } from "node:crypto";
+import { parseLookResponse, serializeOutline, type SerializedOutline } from "./outline.ts";
+
 export interface CdpConsoleEntry {
 	level: string;
 	text: string;
@@ -34,8 +37,10 @@ export interface CdpPageSnapshot {
 	targetId: string;
 	title: string;
 	url: string;
+	capturedAt: number;
 	text: string;
 	targets: CdpSnapshotTarget[];
+	outline: SerializedOutline;
 	diagnostics: {
 		cdp: "connected";
 		targetCount: number;
@@ -271,15 +276,16 @@ export class CdpTab {
 	}
 }
 
-let connectedTab: CdpTab | undefined;
+const connectedTabs = new Map<string, CdpTab>();
+const connectingTabs = new Map<string, Promise<CdpTab>>();
 let lastConnectFailureAt = 0;
 
 /** Close session-owned CDP state without affecting the browser process. */
 export function disconnectCdp(): void {
-	const tab = connectedTab;
-	connectedTab = undefined;
+	for (const tab of connectedTabs.values()) tab.close();
+	connectedTabs.clear();
+	connectingTabs.clear();
 	lastConnectFailureAt = 0;
-	tab?.close();
 }
 
 export function cdpEnabled(): boolean {
@@ -300,8 +306,8 @@ export async function cdpTabForWindow(windowTitle: string, frame?: WindowFrame):
 	if (!cdpEnabled()) return undefined;
 	if (Date.now() - lastConnectFailureAt < CONNECT_FAILURE_RETRY_MS) return undefined;
 
-	if (connectedTab?.isOpen && titlesMatch(connectedTab.title, windowTitle) && (await tabMatchesFrame(connectedTab, frame))) {
-		return connectedTab;
+	for (const tab of connectedTabs.values()) {
+		if (tab.isOpen && titlesMatch(tab.title, windowTitle) && (await tabMatchesFrame(tab, frame))) return tab;
 	}
 
 	try {
@@ -309,13 +315,24 @@ export async function cdpTabForWindow(windowTitle: string, frame?: WindowFrame):
 		const match = await pickTab(pages, windowTitle, frame);
 		if (!match) return undefined;
 
-		if (connectedTab?.targetId === match.id && connectedTab.isOpen) {
-			connectedTab.title = match.title;
-			return connectedTab;
+		const existing = connectedTabs.get(match.id);
+		if (existing?.isOpen) {
+			existing.title = match.title;
+			return existing;
 		}
-		connectedTab?.close();
-		connectedTab = await CdpTab.connect(match.webSocketDebuggerUrl!, match.id, match.title);
-		return connectedTab;
+		let connecting = connectingTabs.get(match.id);
+		if (!connecting) {
+			connecting = CdpTab.connect(match.webSocketDebuggerUrl!, match.id, match.title);
+			connectingTabs.set(match.id, connecting);
+		}
+		let connected: CdpTab;
+		try {
+			connected = await connecting;
+		} finally {
+			connectingTabs.delete(match.id);
+		}
+		connectedTabs.set(match.id, connected);
+		return connected;
 	} catch {
 		lastConnectFailureAt = Date.now();
 		return undefined;
@@ -389,15 +406,18 @@ export async function cdpSnapshotForContext(contextId: string): Promise<CdpPageS
 			tab.evaluate("document.body ? document.body.innerText : ''").catch(() => ""),
 			tab.accessibilityTree().catch(() => []),
 		]);
-		const targets = cdpSnapshotTargets(nodes);
+		const snapshotId = randomUUID();
+		const { targets, outline } = cdpSnapshotOutline(snapshotId, nodes);
 		return {
 			contextId,
-			snapshotId: `snap-${Date.now().toString(36)}`,
+			snapshotId,
 			targetId: page.id,
 			title: page.title,
 			url: page.url ?? "",
+			capturedAt: Date.now(),
 			text: typeof textValue === "string" ? textValue : String(textValue ?? ""),
 			targets,
+			outline,
 			diagnostics: { cdp: "connected", targetCount: targets.length },
 		};
 	} finally {
@@ -442,28 +462,77 @@ function axString(raw: any): string {
 	return typeof value === "string" ? value.trim() : "";
 }
 
-function cdpSnapshotTargets(nodes: unknown[]): CdpSnapshotTarget[] {
-	const targets: CdpSnapshotTarget[] = [];
+function cdpSnapshotOutline(snapshotId: string, nodes: unknown[]): { targets: CdpSnapshotTarget[]; outline: SerializedOutline } {
+	const records = new Map<string, any>();
 	for (const raw of nodes as any[]) {
+		const nodeId = String(raw?.nodeId ?? "");
+		if (nodeId) records.set(nodeId, raw);
+	}
+	const targets: CdpSnapshotTarget[] = [];
+	const build = (raw: any, seen: Set<string>): any => {
+		const nodeId = String(raw?.nodeId ?? randomUUID());
+		if (seen.has(nodeId)) return undefined;
+		seen.add(nodeId);
 		const role = axString(raw?.role);
 		const name = axString(raw?.name);
-		if (!role || !name) continue;
 		const actions = browserActionsForAxRole(role);
-		if (actions.length === 0) continue;
 		const backendNodeId = Number.isFinite(raw?.backendDOMNodeId) ? Math.trunc(raw.backendDOMNodeId) : undefined;
-		if (!backendNodeId && actions.includes("click")) continue;
-		targets.push({
-			ref: `@r${targets.length + 1}`,
-			source: "browser_ax",
+		const wireRef = `cdp:${nodeId}`;
+		if (actions.length > 0 && name && (!actions.includes("click") || backendNodeId)) {
+			targets.push({ ref: wireRef, source: "browser_ax", role, name, value: axString(raw?.value) || undefined, actions, backendNodeId });
+		}
+		const childIds: string[] = Array.isArray(raw?.childIds) ? raw.childIds.map(String) : [];
+		return {
+			ref: wireRef,
 			role,
-			name,
-			value: axString(raw?.value) || undefined,
+			subrole: "",
+			identifier: "",
+			title: name,
+			description: axString(raw?.description),
+			value: axString(raw?.value),
 			actions,
-			backendNodeId,
-		});
-		if (targets.length >= 80) break;
-	}
-	return targets;
+			canPress: actions.includes("click"),
+			canFocus: actions.length > 0,
+			canSetValue: actions.includes("set_text"),
+			canScroll: false,
+			canIncrement: false,
+			canDecrement: false,
+			isTextInput: actions.includes("set_text"),
+			rect: { x: 0, y: 0, w: 0, h: 0 },
+			children: childIds.map((id: string) => records.get(id)).filter(Boolean).map((child: any) => build(child, seen)).filter(Boolean),
+		};
+	};
+	const roots = (nodes as any[]).filter((raw) => !raw?.parentId || !records.has(String(raw.parentId)));
+	const children = roots.map((root) => build(root, new Set())).filter(Boolean);
+	const rawOutline = children.length === 1 ? children[0] : {
+		ref: `cdp:root:${snapshotId}`,
+		role: "document",
+		subrole: "",
+		identifier: "",
+		title: "Browser page",
+		description: "",
+		value: "",
+		actions: [],
+		canPress: false,
+		canFocus: false,
+		canSetValue: false,
+		canScroll: false,
+		canIncrement: false,
+		canDecrement: false,
+		isTextInput: false,
+		rect: { x: 0, y: 0, w: 0, h: 0 },
+		children,
+	};
+	const parsed = parseLookResponse({
+		lookId: snapshotId,
+		capturedAt: Date.now() / 1000,
+		window: { windowId: 0, framePoints: { x: 0, y: 0, w: 1, h: 1 }, scaleFactor: 1, isModal: false, role: "document", subrole: "" },
+		outline: rawOutline,
+		timings: {},
+	}).parsedOutline!;
+	const modelRefByWire = parsed.wireRefToRef;
+	for (const target of targets) target.ref = modelRefByWire.get(target.ref) ?? target.ref;
+	return { targets, outline: serializeOutline(parsed) };
 }
 
 function browserActionsForAxRole(role: string): string[] {

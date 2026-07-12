@@ -15,6 +15,8 @@ export type PlatformRootKind = "window" | "menu" | "sheet" | "popover" | "dialog
 
 export interface PlatformDiagnostics {
 	protocolVersion: number;
+	architectureVersion?: number;
+	invariants?: string[];
 	pid: number;
 	parentPid?: number;
 	parentAppName?: string;
@@ -35,6 +37,7 @@ export interface PlatformReadyState {
 
 export interface PlatformRootQuery {
 	pid?: number;
+	title?: string;
 }
 
 export interface PlatformApp {
@@ -91,12 +94,17 @@ export interface PlatformFocusWindowResult {
 }
 
 export interface HelperActPerformed {
-	grounding?: "description" | "coordinates";
+	grounding?: "description" | "coordinates" | "keyboard-events";
 	/** `ax` means the platform accessibility API (AX on macOS, UIA on Windows). */
 	delivery?: "ax" | NativeInputDelivery;
 	refound?: boolean;
 	/** Free-form diagnostic naming the platform's delta mechanism. */
 	deltaSource?: string;
+	selectionGrounding?: "ax" | "keyboard";
+	transaction?: boolean;
+	actionCount?: number;
+	activated?: boolean;
+	raised?: boolean;
 }
 
 export interface PlatformRootDelta {
@@ -115,6 +123,8 @@ export interface HelperActResult {
 	evidence?: Record<string, unknown>;
 	error?: { code?: string; message?: string; whatIsThere?: unknown };
 	rootDelta?: PlatformRootDelta[];
+	steps?: HelperActResult[];
+	stoppedAt?: number;
 }
 
 export interface PlatformTarget {
@@ -125,6 +135,8 @@ export interface PlatformTarget {
 
 export interface PlatformObserveRequest {
 	target: PlatformTarget;
+	/** Existing immutable look whose untouched refs/coordinate geometry survive a scoped refresh. */
+	baseLookId?: string;
 	readText: "auto" | "always" | "never";
 	scopeRef?: string;
 	maxDimension?: number;
@@ -133,7 +145,7 @@ export interface PlatformObserveRequest {
 
 export type PlatformActAction = "press" | "click" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse";
 export type PlatformActTarget = { ref: string } | { x: number; y: number };
-export type PlatformDeliveryPolicy = "ax_only" | "background" | "default";
+export type PlatformDeliveryPolicy = "ax_only" | "background" | "default" | "foreground";
 export type PlatformMouseButton = "left" | "right" | "middle";
 export type PlatformActDeliveryParam = { delivery?: NativeInputDelivery };
 export type PlatformPoint = { x: number; y: number };
@@ -156,6 +168,8 @@ export type PlatformActRequest = PlatformActRequestBase & (
 );
 
 export interface PlatformReadTextRequest {
+	/** Observation that owns the element ref. Native backends must not resolve across observations. */
+	lookId: string;
 	elementRef: string;
 	offset: number;
 	limit: number;
@@ -172,6 +186,7 @@ export interface PlatformReadTextResponse {
 export interface PlatformWaitForRequest extends PlatformTarget {
 	text?: string;
 	role?: string;
+	value?: string;
 	gone: boolean;
 	timeoutMs: number;
 }
@@ -194,6 +209,8 @@ export interface ComputerUsePlatformBackend {
 	focusWindow(target: PlatformTarget, signal?: AbortSignal): Promise<PlatformFocusWindowResult>;
 	observe(request: PlatformObserveRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<LookResponse>;
 	act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult>;
+	/** Execute one-resource actions with one root baseline and one final settle. */
+	actBatch?(requests: PlatformActRequest[], options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult>;
 	readText(args: PlatformReadTextRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformReadTextResponse>;
 	waitFor(args: PlatformWaitForRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformWaitForResponse>;
 	isBrowserApp(appName: string, bundleId?: string): boolean;

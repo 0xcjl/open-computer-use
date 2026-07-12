@@ -9,6 +9,12 @@
 //! `unsupported_platform` error.
 
 use serde_json::Value;
+#[cfg(windows)]
+use std::collections::{HashMap, VecDeque};
+#[cfg(windows)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(windows)]
+use std::sync::{Mutex, OnceLock};
 
 use crate::error::{ErrorCode, ProtocolError};
 use crate::refs::RefStore;
@@ -38,6 +44,9 @@ pub fn classify_browser(process_name: &str) -> (bool, Option<&'static str>) {
         "chrome" | "chromium" => (true, Some("chrome")),
         "msedge" | "edge" => (true, Some("edge")),
         "brave" | "brave-browser" => (true, Some("brave")),
+        "firefox" => (true, Some("firefox")),
+        "vivaldi" => (true, Some("vivaldi")),
+        "opera" | "opera_gx" => (true, Some("opera")),
         _ => (false, None),
     }
 }
@@ -78,6 +87,8 @@ pub fn list_windows(store: &mut RefStore, filter_pid: Option<u64>) -> Result<Val
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
+use std::{thread, time::Duration};
+#[cfg(windows)]
 use windows::core::PWSTR;
 #[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, RECT, TRUE};
@@ -86,13 +97,197 @@ use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 #[cfg(windows)]
+use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
+#[cfg(windows)]
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow,
-    GWL_EXSTYLE, GW_OWNER, WS_EX_DLGMODALFRAME,
+    EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindow,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, SetForegroundWindow, EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY,
+    EVENT_OBJECT_HIDE, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GWL_EXSTYLE, GW_OWNER, MSG,
+    WINEVENT_OUTOFCONTEXT, WS_EX_DLGMODALFRAME,
 };
+
+#[cfg(windows)]
+const ROOT_EVENT_CAPACITY: usize = 256;
+
+#[cfg(windows)]
+#[derive(Clone)]
+struct JournalEvent {
+    sequence: u64,
+    pid: u64,
+    payload: Value,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct RootEventJournal {
+    events: VecDeque<JournalEvent>,
+    roots: HashMap<isize, Value>,
+}
+
+#[cfg(windows)]
+fn event_journal() -> &'static Mutex<RootEventJournal> {
+    static JOURNAL: OnceLock<Mutex<RootEventJournal>> = OnceLock::new();
+    JOURNAL.get_or_init(|| Mutex::new(RootEventJournal::default()))
+}
+
+#[cfg(windows)]
+fn event_sequence() -> &'static AtomicU64 {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    &SEQUENCE
+}
+
+/// Start the WinEvent message pump used as an acceleration and transient-root
+/// journal. Final root snapshots remain authoritative.
+pub fn start_root_event_journal() {
+    #[cfg(windows)]
+    std::thread::spawn(|| unsafe {
+        let foreground = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            None,
+            Some(root_event_callback),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+        let objects = SetWinEventHook(
+            EVENT_OBJECT_CREATE,
+            EVENT_OBJECT_HIDE,
+            None,
+            Some(root_event_callback),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+        if foreground.is_invalid() && objects.is_invalid() {
+            return;
+        }
+        let mut message = MSG::default();
+        while GetMessageW(&mut message, None, 0, 0).as_bool() {}
+    });
+}
+
+pub fn root_event_cursor() -> u64 {
+    #[cfg(windows)]
+    {
+        event_sequence().load(Ordering::Acquire)
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
+
+pub fn root_events_since(cursor: u64, pid: u64) -> Vec<Value> {
+    #[cfg(windows)]
+    {
+        event_journal()
+            .lock()
+            .map(|journal| {
+                journal
+                    .events
+                    .iter()
+                    .filter(|event| event.sequence > cursor && event.pid == pid)
+                    .map(|event| event.payload.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (cursor, pid);
+        Vec::new()
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn root_event_callback(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    object_id: i32,
+    child_id: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    if hwnd.0.is_null() || (event != EVENT_SYSTEM_FOREGROUND && (object_id != 0 || child_id != 0)) {
+        return;
+    }
+    if event != EVENT_OBJECT_DESTROY && GetAncestor(hwnd, GA_ROOT) != hwnd {
+        return;
+    }
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    if pid == 0 {
+        return;
+    }
+    let raw = hwnd.0 as isize;
+    let mut journal = match event_journal().lock() {
+        Ok(journal) => journal,
+        Err(_) => return,
+    };
+    let change = match event {
+        EVENT_OBJECT_DESTROY | EVENT_OBJECT_HIDE => "closed",
+        EVENT_SYSTEM_FOREGROUND => "focused",
+        _ => "appeared",
+    };
+    let root = if change == "closed" {
+        journal.roots.remove(&raw).unwrap_or_else(|| {
+            json!({
+                "kind": "window", "title": "", "pid": pid, "windowId": raw
+            })
+        })
+    } else {
+        let root = event_root_payload(hwnd, pid);
+        journal.roots.insert(raw, root.clone());
+        root
+    };
+    let sequence = event_sequence().fetch_add(1, Ordering::AcqRel) + 1;
+    let payload = json!({
+        "change": change,
+        "kind": root.get("kind").and_then(Value::as_str).unwrap_or("window"),
+        "title": root.get("title").and_then(Value::as_str).unwrap_or(""),
+        "pid": pid,
+        "isModal": root.get("isModal").and_then(Value::as_bool).unwrap_or(false),
+        "metadata": root.get("metadata").cloned().unwrap_or_else(|| json!({}))
+    });
+    journal.events.push_back(JournalEvent {
+        sequence,
+        pid: u64::from(pid),
+        payload,
+    });
+    while journal.events.len() > ROOT_EVENT_CAPACITY {
+        journal.events.pop_front();
+    }
+}
+
+#[cfg(windows)]
+unsafe fn event_root_payload(hwnd: HWND, pid: u32) -> Value {
+    let class_name = get_window_class(hwnd);
+    let title = get_window_title(hwnd);
+    let owner = GetWindow(hwnd, GW_OWNER).ok();
+    let kind = if class_name == "#32768" {
+        "menu"
+    } else if class_name == "#32770" {
+        "dialog"
+    } else if owner.map(|owner| !owner.0.is_null()).unwrap_or(false) {
+        "popover"
+    } else {
+        "window"
+    };
+    let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+    json!({
+        "kind": kind,
+        "title": title,
+        "pid": pid,
+        "windowId": hwnd.0 as isize,
+        "isModal": class_name == "#32770" || (ex_style & WS_EX_DLGMODALFRAME.0) != 0,
+        "metadata": { "className": class_name, "exStyle": ex_style }
+    })
+}
 
 #[cfg(windows)]
 unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -307,6 +502,39 @@ pub fn focus_window(
         let already_focused = unsafe { GetForegroundWindow() == hwnd };
         let focused = already_focused || unsafe { SetForegroundWindow(hwnd).as_bool() };
         Ok(json!({ "focused": focused, "alreadyFocused": already_focused }))
+    }
+}
+
+/// Bring an HWND to the foreground and confirm ownership before physical input.
+/// Windows can reject SetForegroundWindow, so success is based on observation,
+/// not the API's advisory return value.
+pub fn ensure_foreground(hwnd: isize) -> Result<(), ProtocolError> {
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        Err(ProtocolError::new(
+            "Window focus is only supported on Windows",
+            ErrorCode::UnsupportedPlatform,
+        ))
+    }
+    #[cfg(windows)]
+    {
+        let target = HWND(hwnd as *mut _);
+        for _ in 0..4 {
+            if unsafe { GetForegroundWindow() == target } {
+                return Ok(());
+            }
+            let _ = unsafe { SetForegroundWindow(target) };
+            thread::sleep(Duration::from_millis(20));
+        }
+        if unsafe { GetForegroundWindow() == target } {
+            Ok(())
+        } else {
+            Err(ProtocolError::new(
+                "Windows refused to foreground the target; physical input was not sent",
+                ErrorCode::TargetNotFound,
+            ))
+        }
     }
 }
 

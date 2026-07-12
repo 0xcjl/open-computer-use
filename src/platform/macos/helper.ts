@@ -9,13 +9,15 @@ import { toBoolean, toFiniteNumber, toOptionalString } from "../coerce.ts";
 import type { PlatformDiagnostics } from "../types.ts";
 
 const COMMAND_TIMEOUT_MS = 15_000;
-const HELPER_PROTOCOL_VERSION = 5;
+const HELPER_PROTOCOL_VERSION = 6;
 const HELPER_SETUP_TIMEOUT_MS = 60_000;
 
 export const HELPER_BUNDLE_ID = "com.injaneity.pi-computer-use";
 export const HELPER_APP_PATH = "/Applications/pi-computer-use.app";
 export const HELPER_APP_EXECUTABLE_PATH = path.join(HELPER_APP_PATH, "Contents", "MacOS", "bridge");
-export const HELPER_SOCKET_PATH = path.join(os.homedir(), "Library", "Caches", "pi-computer-use", "bridge.sock");
+const DEFAULT_HELPER_SOCKET_PATH = path.join(os.homedir(), "Library", "Caches", "pi-computer-use", "bridge.sock");
+export const HELPER_SOCKET_PATH = process.env.PI_CU_SOCKET_PATH ?? DEFAULT_HELPER_SOCKET_PATH;
+const usingExternalHelperSocket = HELPER_SOCKET_PATH !== DEFAULT_HELPER_SOCKET_PATH;
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const SETUP_HELPER_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "setup-helper.mjs");
@@ -135,7 +137,14 @@ export class MacosHelperClient {
 	}
 
 	async ensureInstalled(signal?: AbortSignal): Promise<void> {
-		if ((await isExecutable(HELPER_APP_EXECUTABLE_PATH)) && this.helperInstallChecked) return;
+		if (usingExternalHelperSocket) return;
+		// Installation is a deployment/repair operation, not part of every new
+		// agent process's hot path. Protocol compatibility is checked against the
+		// live daemon immediately afterwards.
+		if (await isExecutable(HELPER_APP_EXECUTABLE_PATH)) {
+			this.helperInstallChecked = true;
+			return;
+		}
 
 		// setup-helper syncs the installed helper version/signature once per session.
 		await runProcess(process.execPath, [SETUP_HELPER_SCRIPT, "--runtime"], HELPER_SETUP_TIMEOUT_MS, signal, {
@@ -150,6 +159,7 @@ export class MacosHelperClient {
 	}
 
 	async launchDaemon(signal?: AbortSignal): Promise<void> {
+		if (usingExternalHelperSocket) throw new HelperTransportError(`External helper socket is unavailable at ${HELPER_SOCKET_PATH}.`);
 		await mkdir(path.dirname(HELPER_SOCKET_PATH), { recursive: true });
 		await runProcess("open", ["-n", "-g", "-b", HELPER_BUNDLE_ID, "--args", "serve", "--socket", HELPER_SOCKET_PATH], COMMAND_TIMEOUT_MS, signal);
 	}
@@ -229,6 +239,8 @@ export class MacosHelperClient {
 		const result = await this.command<any>("diagnostics", {}, { signal });
 		const diagnostics = {
 			protocolVersion: Math.trunc(toFiniteNumber(result?.protocolVersion, 0)),
+			architectureVersion: Math.trunc(toFiniteNumber(result?.architectureVersion, 0)),
+			invariants: Array.isArray(result?.invariants) ? result.invariants.filter((value: unknown): value is string => typeof value === "string") : [],
 			pid: Math.trunc(toFiniteNumber(result?.pid, 0)),
 			parentPid: Math.trunc(toFiniteNumber(result?.parentPid, 0)) || undefined,
 			parentAppName: toOptionalString(result?.parentAppName),

@@ -5,12 +5,13 @@
 //! should get its own `RefStore` so that references remain scoped to a
 //! single discovery session.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// An opaque native handle (e.g., HWND or UIA element pointer).
 ///
 /// Kept inside helper memory; never serialized to JSON.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NativeHandle(isize);
 
 impl NativeHandle {
@@ -91,8 +92,9 @@ impl fmt::Display for ElementRef {
 pub struct RefStore {
     next_window_id: u64,
     next_element_id: u64,
-    windows: Vec<NativeHandle>,
-    elements: Vec<NativeHandle>,
+    windows: HashMap<u64, NativeHandle>,
+    window_ids: HashMap<NativeHandle, u64>,
+    elements: HashMap<u64, NativeHandle>,
 }
 
 impl RefStore {
@@ -101,16 +103,21 @@ impl RefStore {
         Self {
             next_window_id: 1,
             next_element_id: 1,
-            windows: Vec::new(),
-            elements: Vec::new(),
+            windows: HashMap::new(),
+            window_ids: HashMap::new(),
+            elements: HashMap::new(),
         }
     }
 
     /// Insert a window native handle and return its `WindowRef`.
     pub fn insert_window(&mut self, handle: NativeHandle) -> WindowRef {
+        if let Some(id) = self.window_ids.get(&handle).copied() {
+            return WindowRef { id };
+        }
         let id = self.next_window_id;
         self.next_window_id += 1;
-        self.windows.push(handle);
+        self.windows.insert(id, handle);
+        self.window_ids.insert(handle, id);
         WindowRef { id }
     }
 
@@ -118,7 +125,7 @@ impl RefStore {
     pub fn insert_element(&mut self, handle: NativeHandle) -> ElementRef {
         let id = self.next_element_id;
         self.next_element_id += 1;
-        self.elements.push(handle);
+        self.elements.insert(id, handle);
         ElementRef { id }
     }
 
@@ -126,16 +133,26 @@ impl RefStore {
     ///
     /// Returns `None` if the ref did not originate from this store.
     pub fn get_window(&self, wref: &WindowRef) -> Option<NativeHandle> {
-        let idx = (wref.id as usize).checked_sub(1)?;
-        self.windows.get(idx).copied()
+        self.windows.get(&wref.id).copied()
     }
 
     /// Look up the native handle for a previously-returned `ElementRef`.
     ///
     /// Returns `None` if the ref did not originate from this store.
     pub fn get_element(&self, eref: &ElementRef) -> Option<NativeHandle> {
-        let idx = (eref.id as usize).checked_sub(1)?;
-        self.elements.get(idx).copied()
+        self.elements.get(&eref.id).copied()
+    }
+
+    /// Keep only the currently discoverable windows while preserving refs for
+    /// HWNDs that remain live. This makes repeated discovery stable and bounded.
+    pub fn retain_window_refs<'a>(&mut self, refs: impl IntoIterator<Item = &'a str>) {
+        let live = refs
+            .into_iter()
+            .filter_map(WindowRef::parse)
+            .map(|reference| reference.id)
+            .collect::<HashSet<_>>();
+        self.windows.retain(|id, _| live.contains(id));
+        self.window_ids.retain(|_, id| live.contains(id));
     }
 }
 

@@ -1,88 +1,108 @@
 # Usage
 
-`pi-computer-use` exposes tools for observing and acting on desktop UI roots on macOS and Windows.
-
 The normal loop is:
 
-1. Find a root or browser context.
-2. Call `observe_ui` on that root.
-3. Use `search_ui`, `expand_ui`, or `inspect_ui` if the target is not obvious.
-4. Call `act_ui` with a current ref.
+1. Find a desktop or browser root.
+2. Observe that root and retain its `stateId`.
+3. Search, expand, or inspect that immutable state.
+4. Act using the same `stateId` and its `@e` refs.
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
-| `find_roots` | Find controllable desktop roots (`window`, `sheet`, `dialog`, `popover`, `menu`). |
-| `list_contexts` | List desktop roots and CDP browser pages. |
-| `observe_ui` | Capture one root look and return a folded UI outline plus running note. |
-| `search_ui` | Search the current outline by text, role, action, or capability. |
+| `find_roots` | Find desktop and CDP browser-page roots. |
+| `observe_ui` | Capture one root and return a folded outline plus `stateId`. |
+| `search_ui` | Search the full cached outline. |
 | `expand_ui` | Show local outline context for one ref. |
-| `inspect_ui` | Show fields, rects, actions, annotations, and evidence for one ref. |
-| `act_ui` | Perform one action by ref or image coordinate. |
-| `read_text` | Page through long text from a text-bearing ref or browser context. |
-| `wait_for` | Wait for text or role to appear or disappear. |
-| `launch_browser_context` | Start a managed CDP browser. |
-| `navigate_browser` | Navigate a browser root or CDP context. |
-| `evaluate_browser` | Run JavaScript in a CDP browser context. |
+| `inspect_ui` | Show fields, rects, actions, and evidence for one ref. |
+| `act_ui` | Perform one checked action transaction and return one final state. |
+| `read_text` | Page through long text owned by a state. |
+| `wait_for` | Wait for text or a role to appear or disappear. |
+| `launch_browser` | Start a managed CDP browser and return page roots. |
+| `navigate_browser` | Navigate the browser page owned by a state. |
+| `evaluate_browser` | Evaluate JavaScript in the browser page owned by a state. |
 
 ## Refs and state
 
-`find_roots` returns root refs like `@r1`. `observe_ui`, `search_ui`, and `expand_ui` return outline refs like `@e12`.
+`find_roots` returns roots such as `@r1`. Every desktop window, transient surface, and CDP page participates in that same forest. `observe_ui` returns element refs such as `@e12` and a `stateId`.
 
-Use current refs from the latest state. A ref can become stale after the UI changes, the root changes, or a new observation replaces the previous outline.
+Every tool that consumes an `@e` ref also requires its owning `stateId`. A state remains queryable while it is in the bounded store, but a mutation from an old resource epoch is rejected as stale. Observe again after another mutation, an uncertain action outcome, or state eviction.
 
-Some outline nodes are marked `pictureOnly`. These represent visual evidence without a platform accessibility element. They can help the agent understand what is visible, but semantic actions cannot target them by ref. Use coordinates only when there is no better semantic target and the latest look has an image.
+Nodes marked `pictureOnly` have visual evidence but no platform accessibility element. Semantic actions cannot target them. Coordinate actions are available only from a current image-bearing desktop state.
 
-## Observation modes
+## Progressive disclosure
 
-`observe_ui` supports three modes:
-
-| Mode | Use when |
-| --- | --- |
-| `semantic` | Platform accessibility structure is enough and you want the cheapest result. |
-| `fused` | Default. Include visual evidence when it is useful. |
-| `visual` | The app is custom drawn or the accessibility tree is sparse. |
-
-`readText` can be set independently of `mode`/`image` (`auto` | `always` | `never`). `always` runs OCR and fuses the recognized text into the outline even when no image is attached; `auto` skips OCR at observe time — if a later `search_ui` finds no actionable match, the harness re-captures with OCR once and searches again, so visual-only text is found without an extra round trip.
-
-Images are optional. Sheet/dialog roots may be semantic-only; coordinate actions clearly reject image-less looks.
-
-## Acting
-
-Prefer refs:
+Use `observe_ui({ root: "@r1" })` for the compact first view. Then query without another capture:
 
 ```ts
-act_ui({ action: "press", ref: "@e12" })
-act_ui({ action: "setText", ref: "@e18", text: "hello" })
-act_ui({ action: "scroll", ref: "@e7", scrollY: 400 })
-act_ui({ action: "keypress", keys: ["Enter"] })
-act_ui({ action: "wait", ms: 500 })
+search_ui({ stateId, text: "Save" })
+expand_ui({ stateId, ref: "@e7", depth: 3 })
+inspect_ui({ stateId, ref: "@e12" })
 ```
 
-Coordinate fallback uses image pixels from the latest observed image-bearing root:
+`semantic` observation is cheapest, `fused` is the default, and `visual` forces visual text evidence. Search can escalate OCR once when the original desktop look omitted it; that refresh is checked against the state's resource epoch.
+
+## Acting and batching
+
+The public action shape is always transactional:
 
 ```ts
-act_ui({ action: "click", x: 420, y: 300 })
+act_ui({ stateId, actions: [{ action: "press", ref: "@e12" }] })
 ```
 
-`act_ui` returns an outcome of `worked`, `didnt`, or `unknown`, plus execution evidence and shallow root deltas when available.
+When an action has an observable completion signal, attach it to the same
+transaction. Pi waits through the platform change-notification path and marks
+the execution `didnt` with `postcondition_failed` if the application swallowed
+the delivered event:
+
+```js
+act_ui({
+  stateId,
+  headless: true,
+  actions: [{ action: "press", ref: "@e12" }],
+  expect: { text: "Archive completed", timeoutMs: 3000 }
+})
+```
+
+Verification reports `verified`, `preexisting`, or `failed`. A preexisting
+condition means the requested end state holds, but is not evidence that the
+action caused it.
+
+Batch steps only when the second step does not need to inspect the result of the first:
+
+```ts
+act_ui({
+  stateId,
+  actions: [
+    { action: "setText", ref: "@e18", text: "hello" },
+    { action: "press", ref: "@e22" },
+  ],
+})
+```
+
+Steps run sequentially against one resource and retain helper checks. The native helper uses one root baseline and final settle for the transaction, and the bridge returns one final observation. If a transition can change the meaning of later refs or requires a decision, send one action, inspect the returned state, then continue.
+
+Coordinate fallback uses image pixels from the observed state:
+
+```ts
+act_ui({ stateId, actions: [{ action: "click", x: 420, y: 300 }] })
+```
 
 ## Browser use
 
-For normal browser windows, use the same desktop flow:
+Browser pages use the same roots, states, and element refs:
 
 ```ts
-find_roots({ app: "Helium", kind: "window" })
-observe_ui({ root: "@r1", mode: "fused" })
-act_ui({ action: "press", ref: "@e12" })
+launch_browser({ browser: "helium", url: "https://example.com" })
+find_roots({ kind: "browser_page" })
+observe_ui({ root: "@r3" })
+act_ui({ stateId, actions: [{ action: "press", ref: "@e7" }] })
+navigate_browser({ stateId: returnedStateId, url: "https://openai.com" })
 ```
 
-For CDP browser contexts:
+`read_text`, `wait_for`, and `evaluate_browser` also need only the browser observation's `stateId`; there is no public `contextId` or separate snapshot flow.
 
-```ts
-launch_browser_context({ browser: "helium", url: "https://example.com" })
-list_contexts()
-navigate_browser({ contextId: "browser:...", url: "https://example.com" })
-evaluate_browser({ contextId: "browser:...", expression: "document.title" })
-```
+## Parallel calls
+
+Pi may issue tool calls concurrently. Cached queries can overlap freely. Live work for different desktop processes or CDP pages can overlap; work for the same physical resource is ordered. Do not intentionally race two mutations derived from the same state: one wins and the other receives a stale-state error by design.

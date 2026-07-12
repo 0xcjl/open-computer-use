@@ -5,6 +5,7 @@
 ```text
 extensions/computer-use.ts       Public Pi tool registration
 src/bridge.ts                    TypeScript runtime and tool implementation
+src/runtime.ts                   Immutable state store and resource scheduler
 src/outline.ts                   Outline parsing, folding, search, and ref mapping
 src/note.ts                      Disposable running-note generation
 native/macos/bridge.swift        macOS helper for AX, capture, permissions, and input
@@ -12,6 +13,7 @@ native/windows/                 Windows backend/helper code when developing on W
 scripts/build-native.mjs         macOS helper build script
 scripts/setup-helper.mjs         macOS helper install script
 scripts/check-invariants.mjs     Architecture invariant checks
+scripts/check-runtime-concurrency.mjs Scheduler/state concurrency checks
 ```
 
 The public tool surface lives in `extensions/computer-use.ts`. Keep it small. Internal complexity belongs in `src/bridge.ts`, `src/outline.ts`, `src/note.ts`, and the native helper.
@@ -34,11 +36,14 @@ npm run build:native
 
 ## Architecture rules
 
-The runtime is outline-first:
+The runtime is state-scoped and outline-first:
 
 - `observe_ui` returns a folded UI outline and running note.
 - `search_ui`, `expand_ui`, and `inspect_ui` provide progressive disclosure.
 - `act_ui` is the only public desktop action entrypoint.
+- UI observations are immutable records; request-local hydration replaces global current state.
+- Cached queries bypass scheduling; live work is ordered per physical resource.
+- Browser pages and desktop surfaces share the `@r` root forest and `@e` outline contract.
 - The helper owns grounding, preflight, execution, and verification.
 - Removed direct tools such as `screenshot`, `click`, `set_text`, and `computer_actions` should not reappear as public extension tools.
 
@@ -50,38 +55,6 @@ npm run test:invariants
 
 Set `PI_CU_LIVE=1` only when you want live helper checks in addition to static checks.
 
-## Benchmarks
-
-`../cubench` is the behavioral benchmark for computer-use clients. This repo includes a Pi client for cubench-runner:
-
-```bash
-node ../cubench/bin/cubench-runner.mjs \
-  --client ./bin/pi-cubench-client.mjs \
-  --task finder.rename.basic \
-  --seed 1 \
-  --variants ax-clean
-```
-
-Use this regression matrix for platform-seam changes:
-
-- `ax-clean`: semantic grounding through a good accessibility tree.
-- `ax-readable-not-actionable`: readable accessibility content with action fallback pressure.
-- `visual-only`: pure visual/coordinate grounding pressure.
-
-`scripts/cubench.mjs` remains a local measurement harness for observation size, helper timing, image size, and bridge round trips.
-
-```bash
-node scripts/cubench.mjs
-```
-
-It writes:
-
-```text
-scripts/cubench-results.json
-```
-
-Use it for changes to accessibility traversal, outline folding, visual evidence, action refresh, browser handling, permissions, setup, or payload size.
-
 ## Native platform helpers
 
 On macOS, the helper installed for permissions is:
@@ -90,7 +63,7 @@ On macOS, the helper installed for permissions is:
 /Applications/pi-computer-use.app
 ```
 
-Local macOS development can use ad-hoc signing. Release builds must use the release workflow so the helper app is signed with the stable release certificate.
+The macOS helper targets macOS 14+ and uses ScreenCaptureKit. Local development can use ad-hoc signing. Release builds must use the release workflow so the helper app is signed with the stable release certificate.
 
 On Windows, development uses the Windows platform backend/helper and the active desktop session rather than the macOS app bundle or TCC permission model.
 

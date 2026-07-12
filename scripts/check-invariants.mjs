@@ -10,6 +10,8 @@ const root = path.resolve(new URL("..", import.meta.url).pathname);
 const swift = fs.readFileSync(path.join(root, "native/macos/bridge.swift"), "utf8");
 const ts = fs.readFileSync(path.join(root, "src/bridge.ts"), "utf8");
 const noteTs = fs.readFileSync(path.join(root, "src/note.ts"), "utf8");
+const configTs = fs.readFileSync(path.join(root, "src/config.ts"), "utf8");
+const setupHelper = fs.readFileSync(path.join(root, "scripts/setup-helper.mjs"), "utf8");
 const srcFiles = fs.readdirSync(path.join(root, "src"), { recursive: true })
 	.filter((file) => typeof file === "string" && file.endsWith(".ts"))
 	.map((file) => [file, fs.readFileSync(path.join(root, "src", file), "utf8")]);
@@ -132,8 +134,67 @@ check("INV-8 tsc no unused locals", () => {
 	execFileSync("npx", ["tsc", "--noEmit"], { cwd: root, stdio: "pipe" });
 });
 
+check("INV-9 immutable state ownership", () => {
+	assert(!/runtimeState\.current(Target|Capture|Look|Outline|Note|ImageMode|StateTarget)/.test(ts), "global current UI state remains in bridge");
+	assert(ts.includes("new StateStore<UiObservation>"), "unified bounded observation store is missing");
+});
+
+check("INV-10 resource-keyed scheduling", () => {
+	assert(ts.includes("desktopResourceKey") && ts.includes("resourceScheduler.write"), "desktop writes are not resource scheduled");
+	assert(!ts.includes("withRuntimeLock"), "global runtime lock remains");
+});
+
+check("INV-11 unified agent contract", () => {
+	const extension = fs.readFileSync(path.join(root, "extensions/computer-use.ts"), "utf8");
+	const tools = [...extension.matchAll(/\bname:\s*"([^"]+)"/g)].map((match) => match[1]);
+	const expected = ["find_roots", "observe_ui", "search_ui", "expand_ui", "inspect_ui", "act_ui", "read_text", "wait_for", "launch_browser", "navigate_browser", "evaluate_browser"];
+	assert(JSON.stringify(tools) === JSON.stringify(expected), `unexpected public tool surface: ${tools.join(", ")}`);
+	assert(!extension.includes('executionMode: "sequential"'), "computer-use tools remain globally sequential");
+	assert(extension.includes("Required state id owning every @e ref"), "state-scoped ref contract is missing");
+});
+
+check("INV-12 parallel native transports", () => {
+	const swift = fs.readFileSync(path.join(root, "native/macos/bridge.swift"), "utf8");
+	const windows = fs.readFileSync(path.join(root, "native/windows/bridge-rs/src/main.rs"), "utf8");
+	assert(swift.includes("Thread.detachNewThread") && swift.includes("physicalInputLock"), "macOS helper is not concurrent with protected physical input");
+	assert(swift.includes("flock(lockFile, LOCK_EX | LOCK_NB)"), "macOS helper daemon is not singleton-safe");
+	assert(windows.includes("thread::spawn") && windows.includes("physical_input_lock"), "Windows helper is not concurrent with protected physical input");
+});
+
+check("INV-14 native batches settle once", () => {
+	const swift = fs.readFileSync(path.join(root, "native/macos/bridge.swift"), "utf8");
+	const windows = fs.readFileSync(path.join(root, "native/windows/bridge-rs/src/main.rs"), "utf8");
+	assert(ts.includes("currentPlatformBackend.actBatch") && ts.includes("dispatchUiTransaction"), "bridge does not route batches through the native transaction seam");
+	assert(swift.includes('case "actBatch"') && swift.includes("deferRootDelta"), "macOS helper does not defer per-step root deltas");
+	assert(windows.includes('"actBatch" => handle_act_batch') && windows.includes("deferRootDelta"), "Windows helper does not defer per-step root deltas");
+	assert(swift.includes('response["stoppedAt"]') && windows.includes('response["stoppedAt"]'), "native batches do not report their checked stop boundary");
+});
+
+check("INV-15 semantic action postconditions", () => {
+	const extension = fs.readFileSync(path.join(root, "extensions/computer-use.ts"), "utf8");
+	const swift = fs.readFileSync(path.join(root, "native/macos/bridge.swift"), "utf8");
+	assert(extension.includes("expect: Type.Optional") && extension.includes("timeoutMs"), "act_ui does not expose a semantic postcondition");
+	assert(ts.includes('code: "postcondition_failed"') && ts.includes('status: "verified" | "preexisting" | "failed"'), "postcondition failure is not represented honestly");
+	assert(swift.includes("waitForRootChange") && swift.includes("state.change.broadcast()"), "macOS waits are not change-notification assisted");
+});
+
+check("INV-16 clean headless contract and non-destructive helper install", () => {
+	assert(!/stealth_mode|stealthMode|PI_COMPUTER_USE_STEALTH|PI_COMPUTER_USE_STRICT_AX/.test(configTs), "obsolete stealth configuration aliases remain");
+	assert(!/tccutil[\s\S]{0,80}reset|resetTcc/i.test(setupHelper), "helper installation can reset macOS privacy grants");
+	assert(setupHelper.includes("pi-computer-use Local Signing (com.injaneity.pi-computer-use)"), "stable bundle-specific local signing identity is missing");
+});
+
 check("INV-8 swift typecheck", () => {
-	execFileSync("xcrun", ["swiftc", "-typecheck", "native/macos/bridge.swift"], { cwd: root, stdio: "pipe" });
+	const triple = process.arch === "x64" ? "x86_64-apple-macosx14.0" : "arm64-apple-macosx14.0";
+	execFileSync("xcrun", [
+		"swiftc", "-target", triple,
+		"-module-cache-path", path.join(os.tmpdir(), `pi-computer-use-swift-typecheck-${process.arch}`),
+		"-framework", "ApplicationServices",
+		"-framework", "AppKit",
+		"-framework", "ScreenCaptureKit",
+		"-framework", "Foundation",
+		"-typecheck", "native/macos/bridge.swift",
+	], { cwd: root, stdio: "pipe" });
 });
 
 function call(socketPath, payload, timeoutMs = 10000) {
@@ -216,7 +277,7 @@ async function liveChecks() {
 	try {
 		const socketPath = process.env.PI_CU_SOCKET_PATH ?? path.join(os.homedir(), "Library/Caches/pi-computer-use/bridge.sock");
 		const diagnostics = await call(socketPath, { id: "inv-diagnostics", cmd: "diagnostics" });
-		check("LIVE diagnostics protocol 3", () => assert(diagnostics.protocolVersion === 3, `protocolVersion=${diagnostics.protocolVersion}`));
+		check("LIVE diagnostics current protocol", () => assert(diagnostics.protocolVersion === 6, `protocolVersion=${diagnostics.protocolVersion}`));
 		const explicitWindowId = process.env.PI_CU_LIVE_WINDOW_ID ? Number(process.env.PI_CU_LIVE_WINDOW_ID) : undefined;
 		let windows = [];
 		try {

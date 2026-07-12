@@ -22,10 +22,8 @@ const windowsHelperDestPath = path.join(os.homedir(), ".pi", "agent", "helpers",
 const helperSourcePath = path.join(rootDir, "native", "macos", "bridge.swift");
 const packageJsonPath = path.join(rootDir, "package.json");
 const releaseRepo = "injaneity/pi-computer-use";
-const localCodeSignCommonName = "pi-computer-use Local Signing";
+const localCodeSignCommonName = "pi-computer-use Local Signing (com.injaneity.pi-computer-use)";
 const localSigningLockPath = path.join(os.tmpdir(), `pi-computer-use-local-signing-${typeof process.getuid === "function" ? process.getuid() : "user"}.lock`);
-const localSigningLockWaitMs = 15_000;
-const localSigningLockStaleMs = 5 * 60_000;
 
 const args = new Set(process.argv.slice(2));
 const isPostinstall = args.has("--postinstall");
@@ -41,18 +39,8 @@ const archTriples = {
 	arm64: "arm64-apple-macosx",
 	x64: "x86_64-apple-macosx",
 };
-const helperVariants = {
-	legacy: {
-		deploymentTarget: "12.0",
-		defines: [],
-		frameworks: ["ApplicationServices", "AppKit", "Foundation"],
-	},
-	modern: {
-		deploymentTarget: "14.0",
-		defines: ["PI_COMPUTER_USE_SCREEN_CAPTURE_KIT"],
-		frameworks: ["ApplicationServices", "AppKit", "ScreenCaptureKit", "Foundation"],
-	},
-};
+const deploymentTarget = "14.0";
+const frameworks = ["ApplicationServices", "AppKit", "ScreenCaptureKit", "Foundation"];
 const defaultCodeSignIdentifier = "com.injaneity.pi-computer-use";
 
 function normalizeArch(arch) {
@@ -60,36 +48,15 @@ function normalizeArch(arch) {
 	throw new Error(`Unsupported architecture '${arch}'. Supported: arm64, x64.`);
 }
 
-function normalizeVariant(variant) {
-	if (variant === "legacy" || variant === "modern") return variant;
-	throw new Error(`Unsupported helper variant '${variant}'. Supported: legacy, modern, auto.`);
+function prebuiltPathForArch(arch) {
+	return path.join(rootDir, "prebuilt", "macos", arch, "bridge");
 }
 
-function darwinMajorVersion() {
-	const major = Number.parseInt(os.release().split(".")[0] ?? "", 10);
-	return Number.isFinite(major) ? major : 0;
+function prebuiltAppPathForArch(arch) {
+	return path.join(rootDir, "prebuilt", "macos", arch, "pi-computer-use.app");
 }
 
-function selectedHelperVariant() {
-	const override = process.env.PI_COMPUTER_USE_HELPER_VARIANT ?? process.env.PI_COMPUTER_USE_CAPTURE_BACKEND ?? "auto";
-	if (override !== "auto") return normalizeVariant(override);
-	return darwinMajorVersion() >= 23 ? "modern" : "legacy";
-}
-
-function prebuiltPathForArch(arch, variant) {
-	return path.join(rootDir, "prebuilt", "macos", arch, variant, "bridge");
-}
-
-function prebuiltAppPathForArch(arch, variant) {
-	return path.join(rootDir, "prebuilt", "macos", arch, variant, "pi-computer-use.app");
-}
-
-function releaseAssetNames(variant) {
-	return [
-		`pi-computer-use-${variant}.app.zip`,
-		...(variant === "modern" ? ["pi-computer-use.app.zip"] : []),
-	];
-}
+const releaseAssetName = "pi-computer-use.app.zip";
 
 async function packageVersion() {
 	const packageJson = JSON.parse(await fs.readFile(packageJsonPath, "utf8"));
@@ -157,20 +124,13 @@ async function run(command, commandArgs) {
 	});
 }
 
-function moduleCachePath(arch, variant) {
-	return path.join(os.tmpdir(), `pi-computer-use-swift-module-cache-${arch}-${variant}`);
+function moduleCachePath(arch) {
+	return path.join(os.tmpdir(), `pi-computer-use-swift-module-cache-${arch}`);
 }
 
 async function commandOutput(command, commandArgs) {
 	const { stdout } = await execFile(command, commandArgs, { encoding: "utf8" });
 	return stdout;
-}
-
-async function commandCombinedOutput(command, commandArgs) {
-	return await execFile(command, commandArgs, { encoding: "utf8" }).then(
-		(result) => `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
-		(error) => `${error.stdout ?? ""}\n${error.stderr ?? ""}`,
-	);
 }
 
 async function downloadFile(url, outputPath) {
@@ -218,37 +178,26 @@ async function findExtractedHelperApp(extractDir) {
 	return undefined;
 }
 
-async function downloadReleaseHelperApp(variant) {
+async function downloadReleaseHelperApp() {
 	const version = await packageVersion();
 	const tag = `v${version}`;
 	const checksums = await releaseChecksums(tag).catch(() => new Map());
 	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-computer-use-release-helper-"));
 	try {
-		for (const assetName of releaseAssetNames(variant)) {
-			const zipPath = path.join(tempDir, assetName);
-			try {
-				await downloadFile(githubReleaseUrl(tag, assetName), zipPath);
-				const expectedSha = checksums.get(assetName);
-				if (expectedSha) await verifySha256(zipPath, expectedSha);
-				const extractDir = path.join(tempDir, "extract", assetName);
-				await fs.mkdir(extractDir, { recursive: true });
-				await run("/usr/bin/ditto", ["-x", "-k", zipPath, extractDir]);
-				const appPath = await findExtractedHelperApp(extractDir);
-				if (!appPath) throw new Error(`missing pi-computer-use.app in ${assetName}`);
-				return { appPath, tempDir, assetName, tag };
-			} catch (error) {
-				await fs.rm(zipPath, { force: true }).catch(() => {});
-				if (assetName === releaseAssetNames(variant).at(-1)) {
-					throw new Error(`No signed ${variant} helper release asset found for ${tag}: ${error instanceof Error ? error.message : String(error)}`);
-				}
-			}
-		}
+		const zipPath = path.join(tempDir, releaseAssetName);
+		await downloadFile(githubReleaseUrl(tag, releaseAssetName), zipPath);
+		const expectedSha = checksums.get(releaseAssetName);
+		if (expectedSha) await verifySha256(zipPath, expectedSha);
+		const extractDir = path.join(tempDir, "extract");
+		await fs.mkdir(extractDir, { recursive: true });
+		await run("/usr/bin/ditto", ["-x", "-k", zipPath, extractDir]);
+		const appPath = await findExtractedHelperApp(extractDir);
+		if (!appPath) throw new Error(`missing pi-computer-use.app in ${releaseAssetName}`);
+		return { appPath, tempDir, assetName: releaseAssetName, tag };
 	} catch (error) {
 		await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {});
-		throw error;
+		throw new Error(`No signed helper release asset found for ${tag}: ${error instanceof Error ? error.message : String(error)}`);
 	}
-	await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {});
-	throw new Error(`No signed ${variant} helper release asset found for ${tag}.`);
 }
 
 async function findDeveloperIdIdentity() {
@@ -258,41 +207,26 @@ async function findDeveloperIdIdentity() {
 }
 
 export function parseCodeSigningIdentities(output, commonName = localCodeSignCommonName) {
-	const identities = [];
-	for (const line of output.split("\n")) {
-		const match = line.match(/^\s*\d+\)\s+([0-9a-fA-F]{40})\s+"([^"]+)"/);
-		if (match?.[2] === commonName) identities.push(match[1].toUpperCase());
-	}
-	return identities;
+	return output.split("\n")
+		.map((line) => line.match(/^\s*\d+\)\s+([0-9A-F]{40})\s+"([^"]+)"/i))
+		.filter((match) => match?.[2] === commonName)
+		.map((match) => match[1].toUpperCase());
 }
 
 async function findLocalSigningIdentity() {
-	// Do not pass `-v`: self-signed identities are intentionally untrusted and
-	// macOS omits them from the "valid only" view even though codesign can use
-	// them. find-identity also proves the certificate has a matching private key.
+	// Self-signed local identities appear as CSSMERR_TP_NOT_TRUSTED and are
+	// omitted by `-v`, but remain valid inputs to codesign. Match the identity
+	// list directly and return its fingerprint rather than its display name.
 	const output = await commandOutput("security", ["find-identity", "-p", "codesigning"]).catch(() => "");
-	const identities = parseCodeSigningIdentities(output);
-	if (identities.length === 0) return undefined;
-
-	const installedIdentity = await currentSigningRequirementKey(helperAppPath).catch(() => undefined);
-	const installedFingerprint = installedIdentity?.startsWith("cert:") ? installedIdentity.slice("cert:".length).toUpperCase() : undefined;
-	const selected = installedFingerprint && identities.includes(installedFingerprint) ? installedFingerprint : identities[0];
-	if (identities.length > 1) {
-		console.warn(`[pi-computer-use] warning: found ${identities.length} local signing identities named '${localCodeSignCommonName}'; using fingerprint ${selected}. Remove stale duplicates from Keychain Access when convenient.`);
-	}
-	return selected;
+	return parseCodeSigningIdentities(output)[0];
 }
 
 function delay(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function withDirectoryLock(lockPath, callback, options = {}) {
-	const waitMs = options.waitMs ?? localSigningLockWaitMs;
-	const staleMs = options.staleMs ?? localSigningLockStaleMs;
-	const retryMs = options.retryMs ?? 50;
+export async function withDirectoryLock(lockPath, callback, { waitMs = 15_000, staleMs = 300_000, retryMs = 50 } = {}) {
 	const deadline = Date.now() + waitMs;
-
 	while (true) {
 		try {
 			await fs.mkdir(lockPath);
@@ -308,7 +242,6 @@ export async function withDirectoryLock(lockPath, callback, options = {}) {
 			await delay(retryMs);
 		}
 	}
-
 	try {
 		return await callback();
 	} finally {
@@ -317,9 +250,7 @@ export async function withDirectoryLock(lockPath, callback, options = {}) {
 }
 
 export async function ensureIdentityOnce(findIdentity, createIdentity, withLock) {
-	const existing = await findIdentity();
-	if (existing) return existing;
-	return await withLock(async () => (await findIdentity()) ?? await createIdentity());
+	return (await findIdentity()) ?? await withLock(async () => (await findIdentity()) ?? await createIdentity());
 }
 
 async function loginKeychainPath() {
@@ -341,45 +272,47 @@ async function ensureLocalSigningIdentity() {
 	const keychain = await loginKeychainPath();
 	if (!keychain) return undefined;
 
-	return await ensureIdentityOnce(
-		findLocalSigningIdentity,
-		async () => {
-			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-computer-use-signing-"));
-			const password = `pi-computer-use-local-${process.pid}-${Date.now()}`;
-			try {
-				const configPath = path.join(tempDir, "req.cnf");
-				await fs.writeFile(configPath, [
-					"[req]",
-					"distinguished_name=dn",
-					"x509_extensions=ext",
-					"prompt=no",
-					"[dn]",
-					`CN=${localCodeSignCommonName}`,
-					"[ext]",
-					"basicConstraints=critical,CA:FALSE",
-					"keyUsage=critical,digitalSignature",
-					"extendedKeyUsage=critical,codeSigning",
-					"",
-				].join("\n"));
-				const keyPath = path.join(tempDir, "key.pem");
-				const certPath = path.join(tempDir, "cert.pem");
-				const p12Path = path.join(tempDir, "id.p12");
-				await execFile("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-keyout", keyPath, "-out", certPath, "-days", "3650", "-nodes", "-config", configPath]);
-				await execFile("openssl", ["pkcs12", "-export", "-legacy", "-inkey", keyPath, "-in", certPath, "-out", p12Path, "-passout", `pass:${password}`, "-name", localCodeSignCommonName])
-					.catch(async () => {
-						await execFile("openssl", ["pkcs12", "-export", "-inkey", keyPath, "-in", certPath, "-out", p12Path, "-passout", `pass:${password}`, "-name", localCodeSignCommonName]);
-					});
-				await execFile("security", ["import", p12Path, "-k", keychain, "-P", password, "-A", "-T", "/usr/bin/codesign"]);
-				return await findLocalSigningIdentity();
-			} catch (error) {
-				console.warn(`[pi-computer-use] could not create a local signing identity: ${error instanceof Error ? error.message : String(error)}`);
-				return undefined;
-			} finally {
-				await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {});
-			}
-		},
-		(callback) => withDirectoryLock(localSigningLockPath, callback),
-	);
+	return await ensureIdentityOnce(findLocalSigningIdentity, createLocalSigningIdentity, (callback) => withDirectoryLock(localSigningLockPath, callback));
+}
+
+async function createLocalSigningIdentity() {
+	const keychain = await loginKeychainPath();
+	if (!keychain) return undefined;
+	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-computer-use-signing-"));
+	const password = `pi-computer-use-local-${process.pid}-${Date.now()}`;
+	try {
+		const configPath = path.join(tempDir, "req.cnf");
+		await fs.writeFile(configPath, [
+			"[req]",
+			"distinguished_name=dn",
+			"x509_extensions=ext",
+			"prompt=no",
+			"[dn]",
+			`CN=${localCodeSignCommonName}`,
+			"[ext]",
+			"basicConstraints=critical,CA:FALSE",
+			"keyUsage=critical,digitalSignature",
+			"extendedKeyUsage=critical,codeSigning",
+			"",
+		].join("\n"));
+		const keyPath = path.join(tempDir, "key.pem");
+		const certPath = path.join(tempDir, "cert.pem");
+		const p12Path = path.join(tempDir, "id.p12");
+		await execFile("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-keyout", keyPath, "-out", certPath, "-days", "3650", "-nodes", "-config", configPath]);
+		await execFile("openssl", ["pkcs12", "-export", "-legacy", "-inkey", keyPath, "-in", certPath, "-out", p12Path, "-passout", `pass:${password}`, "-name", localCodeSignCommonName])
+			.catch(async () => {
+				await execFile("openssl", ["pkcs12", "-export", "-inkey", keyPath, "-in", certPath, "-out", p12Path, "-passout", `pass:${password}`, "-name", localCodeSignCommonName]);
+			});
+		await execFile("security", ["import", p12Path, "-k", keychain, "-P", password, "-A", "-T", "/usr/bin/codesign"]);
+		const identity = await findLocalSigningIdentity();
+		if (!identity) throw new Error("Imported local signing certificate is not a valid code-signing identity.");
+		return identity;
+	} catch (error) {
+		console.warn(`[pi-computer-use] could not create a valid local signing identity: ${error instanceof Error ? error.message : String(error)}`);
+		return undefined;
+	} finally {
+		await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {});
+	}
 }
 
 async function resolveCodeSignIdentity() {
@@ -397,37 +330,10 @@ async function signHelper(outputPath, identifier = defaultCodeSignIdentifier) {
 	await run("codesign", commandArgs);
 	if (identity === "-") {
 		console.warn("[pi-computer-use] warning: signed helper ad-hoc; dev permission grants may need review after native helper changes. Release installs should use a pre-signed helper app or a stable local signing identity.");
-	} else if (/^[0-9A-F]{40}$/i.test(identity)) {
-		console.log(`[pi-computer-use] signed ${outputPath} with stable identity fingerprint ${identity} so TCC grants survive local rebuilds.`);
+	} else if (identity === await findLocalSigningIdentity()) {
+		console.log(`[pi-computer-use] signed ${outputPath} with stable local identity '${localCodeSignCommonName}' so TCC grants survive local rebuilds.`);
 	}
 	return identity;
-}
-
-async function currentSigningRequirementKey(appPath) {
-	const output = await commandCombinedOutput("codesign", ["-d", "-r-", appPath]);
-	const certMatch = output.match(/certificate leaf = H\"([0-9a-fA-F]+)\"/);
-	if (certMatch) return `cert:${certMatch[1].toLowerCase()}`;
-	if (/Signature=adhoc/i.test(await commandCombinedOutput("codesign", ["-dv", "--verbose=4", appPath]))) return "adhoc";
-	return output.trim() || "unknown";
-}
-
-export function shouldResetTccForSigningChange(oldIdentity, newIdentity) {
-	if (!newIdentity?.startsWith("cert:")) return false;
-	if (newIdentity === oldIdentity) return false;
-	return oldIdentity === "adhoc" || oldIdentity?.startsWith("cert:") === true;
-}
-
-// The previous installed app's signature is the source of truth for whether
-// the signing identity changed. An unknown/unreadable old identity must NOT
-// trigger a reset: wiping TCC rows when the identity is in fact unchanged is
-// exactly the recurring-prompt failure this guards against.
-async function resetTccIfSigningIdentityChanged(appPath, oldIdentity) {
-	if (process.platform !== "darwin") return;
-	const newIdentity = await currentSigningRequirementKey(appPath).catch(() => undefined);
-	if (!shouldResetTccForSigningChange(oldIdentity, newIdentity)) return;
-	await execFile("tccutil", ["reset", "Accessibility", helperBundleId]).catch(() => undefined);
-	await execFile("tccutil", ["reset", "ScreenCapture", helperBundleId]).catch(() => undefined);
-	console.log("[pi-computer-use] cleared stale Accessibility / Screen Recording grants pinned to a previous signing identity. Grant once more and future stable-signed rebuilds should keep working.");
 }
 
 async function helperHasAdhocSignature() {
@@ -471,6 +377,7 @@ async function installPrebuiltHelperApp(sourceAppPath) {
 
 async function installHelperApp(sourcePath) {
 	await fs.access(path.dirname(helperAppPath), fsConstants.W_OK);
+	const version = await packageVersion();
 	const infoPlistPath = path.join(helperAppPath, "Contents", "Info.plist");
 	const infoPlist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -480,8 +387,9 @@ async function installHelperApp(sourcePath) {
 <key>CFBundleDisplayName</key><string>pi-computer-use</string>
 <key>CFBundleExecutable</key><string>bridge</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.4.1</string>
-<key>CFBundleVersion</key><string>0.4.1</string>
+<key>CFBundleShortVersionString</key><string>${version}</string>
+<key>CFBundleVersion</key><string>${version}</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
 </dict></plist>\n`;
 
@@ -494,9 +402,7 @@ async function installHelperApp(sourcePath) {
 		// in place so TCC grants survive future native rebuilds.
 		const signingIdentity = process.env.PI_COMPUTER_USE_NO_SIGN === "1" ? "-" : await resolveCodeSignIdentity();
 		if (signingIdentity !== "-" && await helperHasAdhocSignature()) {
-			const oldIdentity = await currentSigningRequirementKey(helperAppPath).catch(() => undefined);
 			await signHelper(helperAppPath, helperBundleId);
-			await resetTccIfSigningIdentityChanged(helperAppPath, oldIdentity);
 			await registerHelperApp();
 			return true;
 		}
@@ -509,7 +415,6 @@ async function installHelperApp(sourcePath) {
 		throw new Error("Refusing to replace an installed helper with an ad-hoc signed rebuild because macOS may reset Accessibility/Screen Recording grants. Use a pre-signed helper app, install a Developer ID identity, or set PI_COMPUTER_USE_ALLOW_ADHOC_UPDATE=1 for local development.");
 	}
 
-	const oldIdentity = await currentSigningRequirementKey(helperAppPath).catch(() => undefined);
 	await fs.mkdir(path.dirname(helperAppExecutablePath), { recursive: true });
 	await fs.mkdir(path.dirname(helperSourceHashPath), { recursive: true });
 	await fs.copyFile(sourcePath, helperAppExecutablePath);
@@ -517,28 +422,25 @@ async function installHelperApp(sourcePath) {
 	await fs.writeFile(infoPlistPath, infoPlist);
 	await fs.writeFile(helperSourceHashPath, `${sourceHash}\n`);
 	await signHelper(helperAppPath, helperBundleId);
-	await resetTccIfSigningIdentityChanged(helperAppPath, oldIdentity);
 	await registerHelperApp();
 	return true;
 }
 
-async function buildHelper(arch, variant, outputPath) {
+async function buildHelper(arch, outputPath) {
 	if (!(await exists(helperSourcePath))) {
 		throw new Error(`Native helper source not found at ${helperSourcePath}`);
 	}
 
-	const config = helperVariants[variant];
 	await fs.mkdir(path.dirname(outputPath), { recursive: true });
 	const swiftArgs = [
 		"swiftc",
 		"-target",
-		`${archTriples[arch]}${config.deploymentTarget}`,
+		`${archTriples[arch]}${deploymentTarget}`,
 		"-module-cache-path",
-		moduleCachePath(arch, variant),
+		moduleCachePath(arch),
 		"-O",
 	];
-	for (const define of config.defines) swiftArgs.push("-D", define);
-	for (const framework of config.frameworks) swiftArgs.push("-framework", framework);
+	for (const framework of frameworks) swiftArgs.push("-framework", framework);
 	swiftArgs.push(helperSourcePath, "-o", outputPath);
 
 	await run("xcrun", swiftArgs);
@@ -598,15 +500,14 @@ async function setup() {
 	}
 
 	const arch = normalizeArch(process.arch);
-	const variant = selectedHelperVariant();
 	// Prefer the release-signed universal bundle (one artifact for both
 	// arches, produced by .github/workflows/release.yml) over
 	// per-arch bundles, over loose binaries (dev fallback).
-	const universalAppPath = prebuiltAppPathForArch("universal", variant);
+	const universalAppPath = prebuiltAppPathForArch("universal");
 	const prebuiltAppPath = (await exists(universalAppPath))
 		? universalAppPath
-		: prebuiltAppPathForArch(arch, variant);
-	const prebuiltPath = prebuiltPathForArch(arch, variant);
+		: prebuiltAppPathForArch(arch);
+	const prebuiltPath = prebuiltPathForArch(arch);
 	const prebuiltAppExists = await exists(prebuiltAppPath);
 	const prebuiltExists = await exists(prebuiltPath);
 
@@ -614,8 +515,8 @@ async function setup() {
 		const installed = await installPrebuiltHelperApp(prebuiltAppPath);
 		console.log(
 			installed
-				? `[pi-computer-use] installed pre-signed ${variant} helper app (${arch}) at ${helperAppPath}`
-				: `[pi-computer-use] pre-signed helper app (${variant}, ${arch}) already current at ${helperAppPath}`,
+				? `[pi-computer-use] installed pre-signed helper app (${arch}) at ${helperAppPath}`
+				: `[pi-computer-use] pre-signed helper app (${arch}) already current at ${helperAppPath}`,
 		);
 		return;
 	}
@@ -624,19 +525,19 @@ async function setup() {
 		const installed = await installHelperApp(prebuiltPath);
 		console.log(
 			installed
-				? `[pi-computer-use] installed ${variant} helper app (${arch}) at ${helperAppPath}`
-				: `[pi-computer-use] helper app (${variant}, ${arch}) already current at ${helperAppPath}`,
+				? `[pi-computer-use] installed helper app (${arch}) at ${helperAppPath}`
+				: `[pi-computer-use] helper app (${arch}) already current at ${helperAppPath}`,
 		);
 		return;
 	}
 
 	try {
-		const releaseHelper = await downloadReleaseHelperApp(variant);
+		const releaseHelper = await downloadReleaseHelperApp();
 		try {
 			const installed = await installPrebuiltHelperApp(releaseHelper.appPath);
 			console.log(
 				installed
-					? `[pi-computer-use] installed signed ${variant} helper app from GitHub Release ${releaseHelper.tag} (${releaseHelper.assetName}) at ${helperAppPath}`
+					? `[pi-computer-use] installed signed helper app from GitHub Release ${releaseHelper.tag} (${releaseHelper.assetName}) at ${helperAppPath}`
 					: `[pi-computer-use] signed helper app from GitHub Release ${releaseHelper.tag} (${releaseHelper.assetName}) already current at ${helperAppPath}`,
 			);
 		} finally {
@@ -644,19 +545,19 @@ async function setup() {
 		}
 		return;
 	} catch (error) {
-		console.warn(`[pi-computer-use] signed ${variant} helper release download unavailable: ${error instanceof Error ? error.message : String(error)}`);
+		console.warn(`[pi-computer-use] signed helper release download unavailable: ${error instanceof Error ? error.message : String(error)}`);
 	}
 
 	if (allowBuildFallback) {
 		const tempPath = path.join(os.tmpdir(), `pi-computer-use-bridge-${process.pid}-${Date.now()}`);
 		try {
-			console.log(`[pi-computer-use] ${variant} prebuilt helper missing; attempting source build with xcrun swiftc...`);
-			await buildHelper(arch, variant, tempPath);
+			console.log("[pi-computer-use] prebuilt helper missing; attempting source build with xcrun swiftc...");
+			await buildHelper(arch, tempPath);
 			const installed = await installHelperApp(tempPath);
 			console.log(
 				installed
-					? `[pi-computer-use] built ${variant} helper app at ${helperAppPath}`
-					: `[pi-computer-use] built ${variant} helper app; installed app already current at ${helperAppPath}`,
+					? `[pi-computer-use] built helper app at ${helperAppPath}`
+					: `[pi-computer-use] built helper app; installed app already current at ${helperAppPath}`,
 			);
 		} finally {
 			await fs.rm(tempPath, { force: true }).catch(() => {});
@@ -665,7 +566,7 @@ async function setup() {
 	}
 
 	throw new Error(
-		`No ${variant} prebuilt helper found for ${arch} at ${prebuiltPath}. Run 'npm run build:native' to build locally.`,
+		`No prebuilt helper found for ${arch} at ${prebuiltPath}. Run 'npm run build:native' to build locally.`,
 	);
 }
 

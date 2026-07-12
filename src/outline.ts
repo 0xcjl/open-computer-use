@@ -54,6 +54,7 @@ export interface Outline {
 
 export interface LookImage {
 	jpegBase64: string;
+	mimeType?: "image/jpeg" | "image/png";
 	width: number;
 	height: number;
 }
@@ -214,6 +215,7 @@ export function parseLookResponse(raw: unknown): LookResponse {
 		},
 		image: image ? {
 			jpegBase64: toString(image.jpegBase64),
+			mimeType: image.mimeType === "image/png" ? "image/png" : "image/jpeg",
 			width: Math.max(1, Math.trunc(toNumber(image.width, 1))),
 			height: Math.max(1, Math.trunc(toNumber(image.height, 1))),
 		} : undefined,

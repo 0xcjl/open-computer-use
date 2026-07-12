@@ -1,5 +1,4 @@
 export type RootSelector = string | number;
-export type WindowSelector = RootSelector;
 export type ImageMode = "auto" | "always" | "never";
 export type MouseButtonName = "left" | "right" | "middle";
 
@@ -7,7 +6,6 @@ export interface ObserveTargetParams {
 	app?: string;
 	windowTitle?: string;
 	root?: RootSelector;
-	window?: RootSelector;
 	image?: ImageMode;
 }
 
@@ -17,66 +15,28 @@ export interface FindParams {
 	bundleId?: string;
 	pid?: number;
 	/** Filters on the platform's best-effort presentation hint; only window vs transient is guaranteed. */
-	kind?: "window" | "menu" | "sheet" | "popover" | "dialog";
+	kind?: "window" | "menu" | "sheet" | "popover" | "dialog" | "browser_page";
 }
 
-export interface WindowTargetParams {
-	contextId?: string;
-	root?: RootSelector;
-	window?: RootSelector;
+export interface StateTargetParams {
 	stateId?: string;
 	image?: ImageMode;
 	responseMode?: "state" | "confirmation";
 }
 
-export interface TypeTextParams extends WindowTargetParams {
-	text: string;
-}
-
-export interface SetTextParams extends WindowTargetParams {
-	text: string;
-	ref?: string;
-}
-
-export interface KeypressParams extends WindowTargetParams {
-	keys: string[];
-}
-
-export interface ScrollParams extends WindowTargetParams {
-	x?: number;
-	y?: number;
-	ref?: string;
-	scrollX?: number;
-	scrollY?: number;
-}
-
-export interface MoveMouseParams extends WindowTargetParams {
-	x: number;
-	y: number;
-}
-
-export interface DragParams extends WindowTargetParams {
-	path?: Array<{ x: number; y: number } | [number, number]>;
-	ref?: string;
-}
-
-export interface NavigateBrowserParams extends WindowTargetParams {
+export interface NavigateBrowserParams extends StateTargetParams {
 	url: string;
 }
 
-export interface LaunchBrowserContextParams {
+export interface LaunchBrowserParams {
 	browser?: "helium" | "chrome";
 	url?: string;
 	port?: number;
 }
 
 export interface EvaluateBrowserParams {
-	contextId: string;
+	stateId: string;
 	expression: string;
-}
-
-export interface WaitParams extends WindowTargetParams {
-	ms?: number;
 }
 
 export interface ObserveParams extends ObserveTargetParams {
@@ -84,25 +44,24 @@ export interface ObserveParams extends ObserveTargetParams {
 	readText?: "auto" | "always" | "never";
 }
 
-export interface SearchUiParams extends WindowTargetParams {
+export interface SearchUiParams extends StateTargetParams {
 	text?: string;
 	role?: string;
 	action?: string;
-	source?: string;
 	limit?: number;
 }
 
-export interface ExpandUiParams extends WindowTargetParams {
+export interface ExpandUiParams extends StateTargetParams {
 	ref: string;
 	depth?: number;
 }
 
-export interface InspectUiParams extends WindowTargetParams {
+export interface InspectUiParams extends StateTargetParams {
 	ref: string;
 	includeRaw?: boolean;
 }
 
-export interface ActParams extends WindowTargetParams {
+export interface UiAction {
 	action: "press" | "click" | "doubleClick" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse" | "wait";
 	ref?: string;
 	x?: number;
@@ -111,50 +70,49 @@ export interface ActParams extends WindowTargetParams {
 	keys?: string[];
 	scrollX?: number;
 	scrollY?: number;
-	path?: DragParams["path"];
+	path?: Array<{ x: number; y: number } | [number, number]>;
 	button?: MouseButtonName;
 	clickCount?: number;
 	ms?: number;
 }
 
-export interface SnapshotParams {
-	contextId: string;
-	scopeRef?: string;
-	maxNodes?: number;
-	maxDepth?: number;
-	image?: ImageMode;
+export interface ActParams extends StateTargetParams {
+	actions: UiAction[];
+	/** Prohibits foreground fallback when true. Background is always attempted first. */
+	headless?: boolean;
+	/** Optional semantic postcondition checked before the transaction reports success. */
+	expect?: {
+		text?: string;
+		role?: string;
+		value?: string;
+		gone?: boolean;
+		timeoutMs?: number;
+	};
 }
 
-export interface ReadTextParams extends WindowTargetParams {
+export interface ReadTextParams extends StateTargetParams {
 	ref?: string;
 	offset?: number;
 	limit?: number;
 }
 
-export interface WaitForParams extends WindowTargetParams {
+export interface WaitForParams extends StateTargetParams {
 	text?: string;
 	role?: string;
 	gone?: boolean;
 	timeoutMs?: number;
 }
 
-// Includes legacy names ("find", "observe", "act", "snapshot") so branch
-// reconstruction still recognizes tool results from pre-rename sessions.
 export const AGENT_TOOL_NAMES = new Set([
 	"find_roots",
-	"find",
-	"list_contexts",
-	"snapshot",
 	"read_text",
 	"wait_for",
 	"observe_ui",
-	"observe",
 	"search_ui",
 	"expand_ui",
 	"inspect_ui",
 	"act_ui",
-	"act",
 	"navigate_browser",
 	"evaluate_browser",
-	"launch_browser_context",
+	"launch_browser",
 ]);

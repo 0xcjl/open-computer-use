@@ -23,7 +23,7 @@ Example:
 ```json
 {
   "browser_use": true,
-  "stealth_mode": false
+  "headless": false
 }
 ```
 
@@ -39,32 +39,25 @@ When `false`, the extension refuses known browser windows. This is useful for pr
 
 Known browser families include Safari, Chrome and Chromium-family browsers, Firefox, Arc, Brave, Edge, Vivaldi, and Helium.
 
-### `stealth_mode`
+### `headless`
 
 Default: `false`
 
-When `true`, actions must use background-safe platform accessibility paths. Raw pointer events, raw keyboard events, foreground focus fallback, and cursor takeover are blocked.
-
-This is also called strict AX mode in the legacy environment variable names.
+When `true`, actions must remain in the background. Raw pointer events, raw keyboard events, foreground focus fallback, and cursor takeover are blocked. When `false` (the default), Pi still attempts verified background delivery first and falls back to foreground only after a typed `foreground_required` result proves that the background attempt caused no action.
 
 ## Environment variables
 
 ```bash
 PI_COMPUTER_USE_BROWSER_USE=0
 PI_COMPUTER_USE_BROWSER_USE=1
-PI_COMPUTER_USE_STEALTH_MODE=0
-PI_COMPUTER_USE_STEALTH_MODE=1
-PI_COMPUTER_USE_STEALTH=1
-PI_COMPUTER_USE_STRICT_AX=1
-PI_COMPUTER_USE_HELPER_VARIANT=auto
-PI_COMPUTER_USE_HELPER_VARIANT=modern
-PI_COMPUTER_USE_HELPER_VARIANT=legacy
+PI_COMPUTER_USE_HEADLESS=0
+PI_COMPUTER_USE_HEADLESS=1
+PI_COMPUTER_USE_DELIVERY_POLICY=default
+PI_COMPUTER_USE_DELIVERY_POLICY=foreground
 PI_COMPUTER_USE_CDP_PORT=9222
 ```
 
-`PI_COMPUTER_USE_STEALTH=1` and `PI_COMPUTER_USE_STRICT_AX=1` force strict AX mode.
-
-`PI_COMPUTER_USE_HELPER_VARIANT` is macOS-only and defaults to `auto`. macOS 14 and newer use the modern ScreenCaptureKit helper. macOS 12 and 13 use the legacy CGWindow and `screencapture` helper. Override this only for testing.
+`PI_COMPUTER_USE_HEADLESS=1` prohibits foreground fallback. `PI_COMPUTER_USE_DELIVERY_POLICY` is a debugging input; normal callers should use `headless`.
 
 ## CDP browser support
 

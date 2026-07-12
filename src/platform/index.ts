@@ -13,6 +13,7 @@ const macosPlatformBackend: ComputerUsePlatformBackend = {
 	focusWindow: macosBackend.focusWindow,
 	observe: macosBackend.observe,
 	act: macosBackend.act,
+	actBatch: macosBackend.actBatch,
 	readText: macosBackend.readText,
 	waitFor: macosBackend.waitFor,
 	isBrowserApp,

@@ -4,14 +4,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { ensureIdentityOnce, parseCodeSigningIdentities, shouldResetTccForSigningChange, withDirectoryLock } from "./setup-helper.mjs";
+import { ensureIdentityOnce, parseCodeSigningIdentities, withDirectoryLock } from "./setup-helper.mjs";
 
 const sample = `
 Policy: Code Signing
   Matching identities
-  1) AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "pi-computer-use Local Signing" (CSSMERR_TP_NOT_TRUSTED)
-  2) BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB "pi-computer-use Local Signing (old)" (CSSMERR_TP_NOT_TRUSTED)
-  3) CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC "pi-computer-use Local Signing" (CSSMERR_TP_NOT_TRUSTED)
+  1) AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "pi-computer-use Local Signing (com.injaneity.pi-computer-use)" (CSSMERR_TP_NOT_TRUSTED)
+  2) BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB "pi-computer-use Local Signing" (CSSMERR_TP_NOT_TRUSTED)
+  3) CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC "pi-computer-use Local Signing (com.injaneity.pi-computer-use)" (CSSMERR_TP_NOT_TRUSTED)
      3 identities found
 `;
 
@@ -20,15 +20,8 @@ assert.deepEqual(parseCodeSigningIdentities(sample), [
 	"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
 ]);
 
-assert.equal(shouldResetTccForSigningChange("adhoc", "cert:aaaa"), true);
-assert.equal(shouldResetTccForSigningChange("cert:bbbb", "cert:aaaa"), true);
-assert.equal(shouldResetTccForSigningChange("cert:aaaa", "cert:aaaa"), false);
-assert.equal(shouldResetTccForSigningChange(undefined, "cert:aaaa"), false);
-assert.equal(shouldResetTccForSigningChange("unknown", "cert:aaaa"), false);
-
-const permissionCopy = await fs.readFile(new URL("../src/platform/macos/permissions.ts", import.meta.url), "utf8");
-assert.match(permissionCopy, /macOS invalidated the old grants because/);
-assert.match(permissionCopy, /switch it off and on again/);
+const setupCopy = await fs.readFile(new URL("./setup-helper.mjs", import.meta.url), "utf8");
+assert.doesNotMatch(setupCopy, /tccutil[\s\S]{0,80}reset|resetTcc/i);
 
 const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-computer-use-signing-test-"));
 const lockPath = path.join(tempDir, "identity.lock");
@@ -53,4 +46,4 @@ try {
 	await fs.rm(tempDir, { force: true, recursive: true });
 }
 
-console.log("[check-local-signing] identity parsing and concurrent creation passed");
+console.log("[check-local-signing] stable identity, non-destructive install, and concurrent creation passed");

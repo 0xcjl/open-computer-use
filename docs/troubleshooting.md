@@ -99,7 +99,7 @@ If `browser_use` is disabled, enable it in either config file:
 
 ## Strict accessibility mode blocks an action
 
-Strict accessibility mode blocks raw pointer events, raw keyboard events, foreground focus fallback, and cursor takeover.
+Headless mode blocks raw pointer events, raw keyboard events, foreground focus fallback, and cursor takeover.
 
 Use refs from the latest `observe_ui` result. If the workflow needs raw events, disable strict accessibility mode.
 

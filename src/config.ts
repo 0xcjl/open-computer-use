@@ -4,7 +4,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export interface ComputerUseConfig {
 	browser_use: boolean;
-	stealth_mode: boolean;
+	headless: boolean;
 }
 
 export interface ComputerUseConfigSource {
@@ -22,7 +22,7 @@ export interface LoadedComputerUseConfig {
 
 const DEFAULT_CONFIG: ComputerUseConfig = {
 	browser_use: true,
-	stealth_mode: false,
+	headless: false,
 };
 
 let activeConfig: ComputerUseConfig = { ...DEFAULT_CONFIG };
@@ -42,10 +42,10 @@ function normalizePartial(raw: unknown): Partial<ComputerUseConfig> {
 	if (!raw || typeof raw !== "object") return {};
 	const source = (raw as any).computer_use && typeof (raw as any).computer_use === "object" ? (raw as any).computer_use : raw;
 	const out: Partial<ComputerUseConfig> = {};
-	const browserUse = parseBoolean((source as any).browser_use ?? (source as any).browserUse);
-	const stealthMode = parseBoolean((source as any).stealth_mode ?? (source as any).stealthMode);
+	const browserUse = parseBoolean((source as any).browser_use);
+	const headless = parseBoolean((source as any).headless);
 	if (browserUse !== undefined) out.browser_use = browserUse;
-	if (stealthMode !== undefined) out.stealth_mode = stealthMode;
+	if (headless !== undefined) out.headless = headless;
 	return out;
 }
 
@@ -62,12 +62,9 @@ function readConfigFile(filePath: string): ComputerUseConfigSource {
 function readEnv(): Partial<ComputerUseConfig> {
 	const out: Partial<ComputerUseConfig> = {};
 	const browserUse = parseBoolean(process.env.PI_COMPUTER_USE_BROWSER_USE);
-	const stealthMode = parseBoolean(process.env.PI_COMPUTER_USE_STEALTH_MODE);
+	const headless = parseBoolean(process.env.PI_COMPUTER_USE_HEADLESS);
 	if (browserUse !== undefined) out.browser_use = browserUse;
-	if (stealthMode !== undefined) out.stealth_mode = stealthMode;
-	if (parseBoolean(process.env.PI_COMPUTER_USE_STEALTH) === true || parseBoolean(process.env.PI_COMPUTER_USE_STRICT_AX) === true) {
-		out.stealth_mode = true;
-	}
+	if (headless !== undefined) out.headless = headless;
 	return out;
 }
 
@@ -95,8 +92,8 @@ export function getLoadedComputerUseConfig(): LoadedComputerUseConfig {
 	return activeLoadedConfig;
 }
 
-export function isStrictAxMode(): boolean {
-	return activeConfig.stealth_mode;
+export function isHeadlessMode(): boolean {
+	return activeConfig.headless;
 }
 
 export function isBrowserUseEnabled(): boolean {

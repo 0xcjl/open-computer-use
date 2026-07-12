@@ -51,6 +51,24 @@ pub fn extract_elements(store: &mut RefStore, hwnd: isize) -> Vec<Value> {
     }
 }
 
+/// Extract the subtree rooted at a previously observed element.
+pub fn extract_elements_from(
+    store: &mut RefStore,
+    hwnd: isize,
+    runtime_id: &[i32],
+    automation_id: &str,
+) -> Result<Vec<Value>, String> {
+    #[cfg(not(windows))]
+    {
+        let _ = (store, hwnd, runtime_id, automation_id);
+        Ok(Vec::new())
+    }
+    #[cfg(windows)]
+    {
+        native::uia_extract_from(store, hwnd, runtime_id, automation_id)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // UIA control type → semantic role mapping
 //
@@ -189,6 +207,7 @@ pub fn annotation_can_set_text(signals: &ElementAnnotationSignals) -> bool {
 #[cfg(windows)]
 mod native {
     use serde_json::{json, Value};
+    use std::collections::HashSet;
 
     use super::{
         annotation_can_press, annotation_can_set_text, control_type_to_role,
@@ -205,6 +224,7 @@ mod native {
     use windows::Win32::UI::Accessibility::*;
 
     const MAX_ELEMENTS: usize = 200;
+    const MAX_TRUNCATION_SCAN: usize = 1_000;
 
     /// Entry point called from the public stub on cfg(windows).
     pub fn uia_extract(store: &mut RefStore, hwnd: isize) -> Result<Vec<Value>, String> {
@@ -220,6 +240,24 @@ mod native {
                 .map_err(|e| format!("ElementFromHandle: {e}"))?
         };
 
+        extract_from_root(store, &uia, &root)
+    }
+
+    pub fn uia_extract_from(
+        store: &mut RefStore,
+        hwnd: isize,
+        runtime_id_target: &[i32],
+        automation_id: &str,
+    ) -> Result<Vec<Value>, String> {
+        let (_com, uia, root) = resolve(hwnd, runtime_id_target, automation_id)?;
+        extract_from_root(store, &uia, &root)
+    }
+
+    fn extract_from_root(
+        store: &mut RefStore,
+        uia: &IUIAutomation,
+        root: &IUIAutomationElement,
+    ) -> Result<Vec<Value>, String> {
         let condition = unsafe {
             uia.CreateTrueCondition()
                 .map_err(|e| format!("CreateTrueCondition: {e}"))?
@@ -238,6 +276,10 @@ mod native {
 
         let limit = count.min(MAX_ELEMENTS);
         let mut elements = Vec::with_capacity(limit);
+        let walker = unsafe {
+            uia.ControlViewWalker()
+                .map_err(|e| format!("ControlViewWalker: {e}"))?
+        };
 
         for i in 0..limit {
             let element = unsafe {
@@ -245,8 +287,75 @@ mod native {
                     .GetElement(i as _)
                     .map_err(|e| format!("GetElement({i}): {e}"))?
             };
-            if let Some(json_val) = element_to_json(store, &element) {
+            let parent_runtime_id = unsafe { walker.GetParentElement(&element).ok() }
+                .and_then(|parent| runtime_id(&parent))
+                .unwrap_or_default();
+            if let Some(json_val) = element_to_json(store, &element, parent_runtime_id) {
                 elements.push(json_val);
+            }
+        }
+
+        if count > limit {
+            let retained = elements
+                .iter()
+                .filter_map(|element| element.get("runtimeId").and_then(Value::as_array))
+                .map(|runtime_id| {
+                    runtime_id
+                        .iter()
+                        .filter_map(Value::as_i64)
+                        .map(|value| value.to_string())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                })
+                .collect::<HashSet<_>>();
+            let mut truncated = HashSet::new();
+            for i in limit..count.min(limit + MAX_TRUNCATION_SCAN) {
+                let mut candidate = unsafe { found.GetElement(i as _).ok() };
+                for _ in 0..64 {
+                    let Some(element) = candidate else { break };
+                    let Some(parent) = (unsafe { walker.GetParentElement(&element).ok() }) else {
+                        break;
+                    };
+                    let key = runtime_id(&parent)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(i32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    if retained.contains(&key) {
+                        truncated.insert(key);
+                        break;
+                    }
+                    candidate = Some(parent);
+                }
+            }
+            // If the omitted tail is larger than the bounded ancestry scan,
+            // mark the retained extraction root as an honest coarse boundary.
+            if count > limit + MAX_TRUNCATION_SCAN {
+                let root_key = runtime_id(root)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(i32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(".");
+                truncated.insert(root_key);
+            }
+            for element in &mut elements {
+                let key = element
+                    .get("runtimeId")
+                    .and_then(Value::as_array)
+                    .map(|runtime_id| {
+                        runtime_id
+                            .iter()
+                            .filter_map(Value::as_i64)
+                            .map(|value| value.to_string())
+                            .collect::<Vec<_>>()
+                            .join(".")
+                    })
+                    .unwrap_or_default();
+                if truncated.contains(&key) {
+                    element["truncated"] = json!(true);
+                }
             }
         }
 
@@ -280,7 +389,11 @@ mod native {
     ///
     /// Returns `None` for elements that are offscreen, zero-sized, or
     /// otherwise uninteresting.
-    fn element_to_json(store: &mut RefStore, element: &IUIAutomationElement) -> Option<Value> {
+    fn element_to_json(
+        store: &mut RefStore,
+        element: &IUIAutomationElement,
+        parent_runtime_id: Vec<i32>,
+    ) -> Option<Value> {
         let ctrl_type = unsafe { element.CurrentControlType().ok()? };
         let role = control_type_to_role(ctrl_type.0 as u32);
 
@@ -327,6 +440,12 @@ mod native {
                 .map(|value| value.as_bool())
                 .unwrap_or(false)
         };
+        let is_password = unsafe {
+            element
+                .CurrentIsPassword()
+                .map(|value| value.as_bool())
+                .unwrap_or(false)
+        };
         let value_pattern = unsafe {
             element
                 .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
@@ -369,8 +488,10 @@ mod native {
             "label": name,
             "automationId": automation_id,
             "runtimeId": runtime_id,
+            "parentRuntimeId": parent_runtime_id,
             "className": class_name,
             "value": value,
+            "isPassword": is_password,
             "bounds": {
                 "x": rect.left,
                 "y": rect.top,

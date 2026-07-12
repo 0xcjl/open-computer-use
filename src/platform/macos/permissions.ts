@@ -3,6 +3,7 @@ import { ensurePermissions, type PermissionKind, type PermissionStatus } from ".
 import { toBoolean, toFiniteNumber, toOptionalString } from "../coerce.ts";
 import type { PlatformReadyState } from "../types.ts";
 import { HELPER_APP_PATH, macosHelper } from "./helper.ts";
+import { assertPlatformArchitecture } from "../architecture.ts";
 
 const GRANT_INSTRUCTIONS =
 	"Grant Accessibility and Screen Recording to pi-computer-use.app in System Settings → Privacy & Security. " +
@@ -55,12 +56,11 @@ async function checkPermissions(signal?: AbortSignal): Promise<PermissionStatus>
 	const rawSource = result?.source;
 	return {
 		accessibility: toBoolean(result?.accessibility),
-		// Authoritative: the helper's live ScreenCaptureKit probe. Fall back to
-		// the plain boolean for old protocol-1 helpers.
-		screenRecording: toBoolean(result?.screenRecordingCapturable ?? result?.screenRecording),
+		// Authoritative: the helper's live ScreenCaptureKit probe.
+		screenRecording: toBoolean(result?.screenRecordingCapturable),
 		// Keep the preflight value separate: disagreement means stale per-process
 		// TCC cache or a grant row belonging to another app identity.
-		screenRecordingPreflight: toBoolean(result?.screenRecordingPreflight ?? result?.screenRecording),
+		screenRecordingPreflight: toBoolean(result?.screenRecordingPreflight),
 		source: rawSource && typeof rawSource === "object"
 			? {
 				// macOS attributes Accessibility / Screen Recording grants to the
@@ -96,6 +96,7 @@ export async function ensureMacosReady(
 		throw new Error(`pi-computer-use helper app daemon did not start. Helper app: ${HELPER_APP_PATH}`);
 	}
 	const helperDiagnostics = await macosHelper.ensureProtocol(signal);
+	assertPlatformArchitecture("macOS", helperDiagnostics);
 
 	const now = Date.now();
 	const cachedStatus = state.permissionStatus;

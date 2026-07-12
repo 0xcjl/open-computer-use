@@ -6,6 +6,8 @@
 
 `pi-computer-use` lets AI agents use desktop apps on macOS and Windows.
 
+The macOS helper requires macOS 14 or newer.
+
 An agent can look at an app window, understand the buttons and text inside it, and perform actions like clicking, typing, scrolling, and waiting for something to change. This is useful when the agent needs to work with a normal desktop app instead of an API, a terminal command, or a file.
 
 New to computer use? Start with: [Wait, what exactly is Computer Use?](http://localhost:4173/what-exactly-is-computer-use/)
@@ -32,7 +34,7 @@ Computer use is most helpful when the only available interface is the app on scr
 ## Install
 
 ```bash
-pi install git:github.com/injaneity/pi-computer-use@v0.4.1
+pi install git:github.com/injaneity/pi-computer-use@v0.4.2
 ```
 
 Start Pi and complete the platform setup flow.
@@ -67,8 +69,6 @@ Use `/computer-use` inside Pi to show the active configuration and where it came
 
 See [docs/usage.md](./docs/usage.md) for the full tool reference.
 
-> Renamed from the 0.4.x names `find`, `observe`, and `act` so the generic names no longer collide with tools from other extensions (see issue #19).
-
 ## Documentation
 
 - [Usage](./docs/usage.md)
@@ -80,9 +80,7 @@ See [docs/usage.md](./docs/usage.md) for the full tool reference.
 
 ## Development status
 
-The current architecture is centered on `observe_ui` and `act_ui`: first inspect the current UI state, then ask the helper to perform one grounded action transaction. Older direct tools such as `screenshot`, `click`, `set_text`, and `computer_actions` are no longer part of the public extension surface.
-
-Behavioral benchmarking should use `cubench-runner` with `./bin/pi-cubench-client.mjs`; `node scripts/cubench.mjs` is only the local measurement harness.
+The architecture is centered on immutable, state-scoped observations. Desktop surfaces and CDP pages form one multi-root forest; progressive outline queries remain cached, while live work is ordered per physical resource so independent roots can run in parallel. `act_ui` accepts one or more checked steps and returns one final state. Older direct tools such as `screenshot`, `click`, `set_text`, and `computer_actions` are no longer part of the public extension surface.
 
 ## License
 

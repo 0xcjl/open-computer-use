@@ -26,8 +26,12 @@ pub enum ErrorCode {
     CoordinateUnavailableForRoot,
     #[serde(rename = "coordinate_blocked")]
     CoordinateBlocked,
+    #[serde(rename = "foreground_required")]
+    ForegroundRequired,
     #[serde(rename = "occluded_target")]
     OccludedTarget,
+    #[serde(rename = "secure_text_unreadable")]
+    SecureTextUnreadable,
 }
 
 impl fmt::Display for ErrorCode {
@@ -44,7 +48,9 @@ impl fmt::Display for ErrorCode {
             ErrorCode::StaleRef => "stale_ref",
             ErrorCode::CoordinateUnavailableForRoot => "coordinate_unavailable_for_root",
             ErrorCode::CoordinateBlocked => "coordinate_blocked",
+            ErrorCode::ForegroundRequired => "foreground_required",
             ErrorCode::OccludedTarget => "occluded_target",
+            ErrorCode::SecureTextUnreadable => "secure_text_unreadable",
         };
         write!(f, "{s}")
     }

@@ -13,18 +13,8 @@ const archTriples = {
 	arm64: "arm64-apple-macosx",
 	x64: "x86_64-apple-macosx",
 };
-const helperVariants = {
-	legacy: {
-		deploymentTarget: "12.0",
-		defines: [],
-		frameworks: ["ApplicationServices", "AppKit", "Foundation"],
-	},
-	modern: {
-		deploymentTarget: "14.0",
-		defines: ["PI_COMPUTER_USE_SCREEN_CAPTURE_KIT"],
-		frameworks: ["ApplicationServices", "AppKit", "ScreenCaptureKit", "Foundation"],
-	},
-};
+const deploymentTarget = "14.0";
+const frameworks = ["ApplicationServices", "AppKit", "ScreenCaptureKit", "Foundation"];
 const defaultCodeSignIdentifier = "com.injaneity.pi-computer-use";
 
 async function exists(filePath) {
@@ -54,11 +44,6 @@ function normalizeArch(arch) {
 	throw new Error(`Unsupported architecture '${arch}'. Supported: arm64, x64, universal, all.`);
 }
 
-function normalizeVariant(variant) {
-	if (variant === "legacy" || variant === "modern" || variant === "all") return variant;
-	throw new Error(`Unsupported helper variant '${variant}'. Supported: legacy, modern, all.`);
-}
-
 async function run(command, args) {
 	await new Promise((resolve, reject) => {
 		const child = spawn(command, args, { stdio: "inherit" });
@@ -73,26 +58,24 @@ async function run(command, args) {
 	});
 }
 
-function defaultOutputPath(arch, variant) {
-	return path.join(rootDir, "prebuilt", "macos", arch, variant, "bridge");
+function defaultOutputPath(arch) {
+	return path.join(rootDir, "prebuilt", "macos", arch, "bridge");
 }
 
-function moduleCachePath(arch, variant) {
-	return path.join(os.tmpdir(), `pi-computer-use-swift-module-cache-${arch}-${variant}`);
+function moduleCachePath(arch) {
+	return path.join(os.tmpdir(), `pi-computer-use-swift-module-cache-${arch}`);
 }
 
-function swiftArgsForArch(arch, variant, outputPath) {
-	const config = helperVariants[variant];
+function swiftArgsForArch(arch, outputPath) {
 	const args = [
 		"swiftc",
 		"-target",
-		`${archTriples[arch]}${config.deploymentTarget}`,
+		`${archTriples[arch]}${deploymentTarget}`,
 		"-module-cache-path",
-		moduleCachePath(arch, variant),
+		moduleCachePath(arch),
 		"-O",
 	];
-	for (const define of config.defines) args.push("-D", define);
-	for (const framework of config.frameworks) args.push("-framework", framework);
+	for (const framework of frameworks) args.push("-framework", framework);
 	args.push(sourcePath, "-o", outputPath);
 	return args;
 }
@@ -117,26 +100,26 @@ async function signBinary(outputPath) {
 	await run("codesign", args);
 }
 
-async function buildForArch(arch, variant, outputPath) {
+async function buildForArch(arch, outputPath) {
 	await fs.mkdir(path.dirname(outputPath), { recursive: true });
-	console.log(`Building ${variant} native helper for ${arch}...`);
-	await run("xcrun", swiftArgsForArch(arch, variant, outputPath));
+	console.log(`Building native helper for ${arch}...`);
+	await run("xcrun", swiftArgsForArch(arch, outputPath));
 	await fs.chmod(outputPath, 0o755);
 	await signBinary(outputPath);
-	console.log(`Built ${variant} helper at ${outputPath}`);
+	console.log(`Built helper at ${outputPath}`);
 }
 
-async function buildUniversal(variant, outputPath) {
+async function buildUniversal(outputPath) {
 	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-computer-use-build-"));
-	const x64Output = path.join(tempDir, `bridge-x64-${variant}`);
-	const arm64Output = path.join(tempDir, `bridge-arm64-${variant}`);
-	await buildForArch("x64", variant, x64Output);
-	await buildForArch("arm64", variant, arm64Output);
+	const x64Output = path.join(tempDir, "bridge-x64");
+	const arm64Output = path.join(tempDir, "bridge-arm64");
+	await buildForArch("x64", x64Output);
+	await buildForArch("arm64", arm64Output);
 	await fs.mkdir(path.dirname(outputPath), { recursive: true });
 	await run("lipo", ["-create", "-output", outputPath, x64Output, arm64Output]);
 	await fs.chmod(outputPath, 0o755);
 	await signBinary(outputPath);
-	console.log(`Built universal ${variant} helper at ${outputPath}`);
+	console.log(`Built universal helper at ${outputPath}`);
 	await fs.rm(tempDir, { recursive: true, force: true });
 }
 
@@ -144,38 +127,46 @@ async function buildUniversal(variant, outputPath) {
  * Return the actual cargo binary path, handling platform suffix differences.
  * On Windows, the binary is named "windows-bridge.exe"; on other platforms it's "windows-bridge".
  */
-function windowsBinaryPath(crateDir) {
-	const releaseDir = path.join(crateDir, "target", "release");
-	const exePath = path.join(releaseDir, "windows-bridge.exe");
-	const binPath = path.join(releaseDir, "windows-bridge");
-	// Return both candidates; callers should check existence (e.g., with exists()).
-	// The .exe variant is preferred on Windows; the bare variant is used on non-Windows hosts
-	// when cross-compiling the Windows helper binary.
-	return { exePath, binPath };
+function windowsBinaryPath(crateDir, target) {
+	const releaseDir = target
+		? path.join(crateDir, "target", target, "release")
+		: path.join(crateDir, "target", "release");
+	return path.join(releaseDir, "windows-bridge.exe");
 }
 
 async function buildWindowsHelper(prebuiltOutput) {
+	const target = getArg("--target");
+	if (process.platform !== "win32" && !target?.includes("windows")) {
+		throw new Error("Refusing to label a host binary as Windows. Build on Windows or pass an explicit Windows --target triple.");
+	}
 	const prebuiltDir = prebuiltOutput
 		? path.resolve(process.cwd(), prebuiltOutput, "..")
 		: path.join(rootDir, "prebuilt", "windows");
 	const manifestPath = path.join(windowsCrateDir, "Cargo.toml");
 
 	console.log("Building Windows helper with cargo...");
-	await run("cargo", [
+	const cargoArgs = [
 		"build",
 		"--release",
 		"--manifest-path",
 		manifestPath,
-	]);
+	];
+	if (target) cargoArgs.push("--target", target);
+	await run("cargo", cargoArgs);
 
 	await fs.mkdir(prebuiltDir, { recursive: true });
 
-	const { exePath, binPath } = windowsBinaryPath(windowsCrateDir);
-	const cargoOutput = (await exists(exePath))
-		? exePath
-		: (await exists(binPath))
-			? binPath
-			: exePath;
+	const cargoOutput = windowsBinaryPath(windowsCrateDir, target);
+	const handle = await fs.open(cargoOutput, "r");
+	try {
+		const signature = Buffer.alloc(2);
+		await handle.read(signature, 0, 2, 0);
+		if (signature.toString("ascii") !== "MZ") {
+			throw new Error(`Cargo output is not a Windows PE executable: ${cargoOutput}`);
+		}
+	} finally {
+		await handle.close();
+	}
 	const prebuiltDest = path.join(prebuiltDir, "windows-bridge.exe");
 	await fs.copyFile(cargoOutput, prebuiltDest);
 	await fs.chmod(prebuiltDest, 0o755);
@@ -204,30 +195,25 @@ async function main() {
 	}
 
 	const arch = normalizeArch(getArg("--arch") ?? process.arch);
-	const variant = normalizeVariant(getArg("--variant") ?? "modern");
 	const outputArg = getArg("--output");
 
-	if (arch === "all" || variant === "all") {
+	if (arch === "all") {
 		if (outputArg) {
-			throw new Error("--output is not supported with --arch all or --variant all. Use a single arch/variant for one output.");
+			throw new Error("--output is not supported with --arch all. Use a single architecture for one output.");
 		}
-		const archList = arch === "all" ? ["x64", "arm64"] : [arch];
-		const variantList = variant === "all" ? ["legacy", "modern"] : [variant];
-		for (const nextVariant of variantList) {
-			for (const nextArch of archList) {
-				await buildForArch(nextArch, nextVariant, defaultOutputPath(nextArch, nextVariant));
-			}
+		for (const nextArch of ["x64", "arm64"]) {
+			await buildForArch(nextArch, defaultOutputPath(nextArch));
 		}
 		return;
 	}
 
-	const outputPath = outputArg ? path.resolve(process.cwd(), outputArg) : defaultOutputPath(arch, variant);
+	const outputPath = outputArg ? path.resolve(process.cwd(), outputArg) : defaultOutputPath(arch);
 	if (arch === "universal") {
-		await buildUniversal(variant, outputPath);
+		await buildUniversal(outputPath);
 		return;
 	}
 
-	await buildForArch(arch, variant, outputPath);
+	await buildForArch(arch, outputPath);
 }
 
 main().catch((error) => {

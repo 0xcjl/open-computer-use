@@ -19,7 +19,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 #[cfg(windows)]
 use image::codecs::png::PngEncoder;
 #[cfg(windows)]
-use image::{ExtendedColorType, ImageEncoder};
+use image::{imageops::FilterType, ExtendedColorType, ImageEncoder, RgbaImage};
 #[cfg(windows)]
 use serde_json::json;
 
@@ -57,12 +57,14 @@ pub fn screenshot(
     store: &mut RefStore,
     target_ref: &WindowRef,
     include_elements: bool,
+    max_dimension: Option<u32>,
 ) -> Result<Value, ProtocolError> {
     #[cfg(not(windows))]
     {
         let _ = store;
         let _ = target_ref;
         let _ = include_elements;
+        let _ = max_dimension;
         Err(ProtocolError::new(
             "Screenshot capture is only supported on Windows",
             ErrorCode::UnsupportedPlatform,
@@ -71,7 +73,7 @@ pub fn screenshot(
 
     #[cfg(windows)]
     {
-        screenshot_impl(store, target_ref, include_elements)
+        screenshot_impl(store, target_ref, include_elements, max_dimension)
     }
 }
 
@@ -83,8 +85,9 @@ pub fn screenshot(
 use windows::Win32::Foundation::{HWND, RECT};
 #[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
+    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
     ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
+    SRCCOPY,
 };
 #[cfg(windows)]
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
@@ -96,6 +99,7 @@ fn screenshot_impl(
     store: &mut RefStore,
     target_ref: &WindowRef,
     include_elements: bool,
+    max_dimension: Option<u32>,
 ) -> Result<Value, ProtocolError> {
     // 1. Look up the window handle.
     let native = store.get_window(target_ref).ok_or_else(|| {
@@ -151,7 +155,8 @@ fn screenshot_impl(
     // SAFETY: All GDI objects are created and destroyed within this
     // function.  Object lifetimes follow the Acquire → Use → Release
     // pattern with proper cleanup on every error path.
-    let png_base64 = unsafe { gdi_capture_to_base64(hwnd, width, height) }?;
+    let (png_base64, output_width, output_height) =
+        unsafe { gdi_capture_to_base64(hwnd, x, y, width, height, max_dimension) }?;
 
     let state_id = StateId::fresh("s");
 
@@ -162,8 +167,8 @@ fn screenshot_impl(
             "stateId": state_id,
             "x": x,
             "y": y,
-            "width": width,
-            "height": height,
+            "width": output_width,
+            "height": output_height,
             "imageFormat": "png",
             "imageBase64": png_base64,
         },
@@ -191,9 +196,12 @@ fn screenshot_impl(
 #[cfg(windows)]
 unsafe fn gdi_capture_to_base64(
     hwnd: HWND,
+    window_x: i32,
+    window_y: i32,
     width: i32,
     height: i32,
-) -> Result<String, ProtocolError> {
+    max_dimension: Option<u32>,
+) -> Result<(String, u32, u32), ProtocolError> {
     // Acquire the window DC.
     let hdc_window = GetDC(hwnd);
     if hdc_window.is_invalid() {
@@ -254,7 +262,7 @@ unsafe fn gdi_capture_to_base64(
     let buf_size = (width as usize) * (height as usize) * 4;
     let mut bits: Vec<u8> = vec![0u8; buf_size];
 
-    let dib_ok = GetDIBits(
+    let mut dib_ok = GetDIBits(
         hdc_mem,
         hbitmap,
         0,
@@ -263,6 +271,36 @@ unsafe fn gdi_capture_to_base64(
         &mut bmi,
         DIB_RGB_COLORS,
     );
+
+    // PrintWindow frequently returns a successful but black bitmap for GPU
+    // surfaces (Chromium/Electron). Fall back to the compositor-visible screen
+    // pixels only when the semantic capture failed or is effectively blank.
+    let print_window_blank = bits
+        .chunks_exact(4)
+        .step_by(97)
+        .all(|pixel| pixel[0] < 8 && pixel[1] < 8 && pixel[2] < 8);
+    if !pw_ok.as_bool() || dib_ok == 0 || print_window_blank {
+        let screen_dc = GetDC(HWND(std::ptr::null_mut()));
+        if !screen_dc.is_invalid()
+            && BitBlt(
+                hdc_mem, 0, 0, width, height, screen_dc, window_x, window_y, SRCCOPY,
+            )
+            .is_ok()
+        {
+            dib_ok = GetDIBits(
+                hdc_mem,
+                hbitmap,
+                0,
+                height as u32,
+                Some(bits.as_mut_ptr() as *mut std::ffi::c_void),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+        }
+        if !screen_dc.is_invalid() {
+            ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
+        }
+    }
 
     // Restore old bitmap and destroy GDI objects.
     SelectObject(hdc_mem, old_bitmap);
@@ -282,12 +320,42 @@ unsafe fn gdi_capture_to_base64(
         chunk.swap(0, 2);
     }
 
+    let source_width = width as u32;
+    let source_height = height as u32;
+    let (output_width, output_height) = match max_dimension.filter(|limit| *limit > 0) {
+        Some(limit) if source_width.max(source_height) > limit => {
+            let scale = limit as f64 / source_width.max(source_height) as f64;
+            (
+                (source_width as f64 * scale).round().max(1.0) as u32,
+                (source_height as f64 * scale).round().max(1.0) as u32,
+            )
+        }
+        _ => (source_width, source_height),
+    };
+    let pixels = if (output_width, output_height) == (source_width, source_height) {
+        bits
+    } else {
+        let source = RgbaImage::from_raw(source_width, source_height, bits).ok_or_else(|| {
+            ProtocolError::new(
+                "Captured bitmap had an invalid byte length",
+                ErrorCode::CaptureFailed,
+            )
+        })?;
+        image::imageops::resize(&source, output_width, output_height, FilterType::Triangle)
+            .into_raw()
+    };
+
     // Encode to PNG in memory.
     let mut png_data: Vec<u8> = Vec::new();
     {
         let encoder = PngEncoder::new(&mut png_data);
         encoder
-            .write_image(&bits, width as u32, height as u32, ExtendedColorType::Rgba8)
+            .write_image(
+                &pixels,
+                output_width,
+                output_height,
+                ExtendedColorType::Rgba8,
+            )
             .map_err(|e| {
                 ProtocolError::new(
                     format!("PNG encoding failed: {e}"),
@@ -297,7 +365,7 @@ unsafe fn gdi_capture_to_base64(
     }
 
     // Base64-encode the PNG bytes.
-    Ok(BASE64.encode(&png_data))
+    Ok((BASE64.encode(&png_data), output_width, output_height))
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +387,7 @@ mod unit_tests {
     fn test_screenshot_unsupported_platform() {
         let mut store = RefStore::new();
         let wref = WindowRef { id: 1 };
-        let result = screenshot(&mut store, &wref, false);
+        let result = screenshot(&mut store, &wref, false, None);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code, ErrorCode::UnsupportedPlatform);
@@ -391,7 +459,7 @@ mod unit_tests {
         // on Windows an empty store would return TargetNotFound.
         let mut store = RefStore::new();
         let wref = WindowRef { id: 999 };
-        let result = screenshot(&mut store, &wref, false);
+        let result = screenshot(&mut store, &wref, false, None);
         assert!(result.is_err());
         let err = result.unwrap_err();
         #[cfg(not(windows))]
@@ -412,7 +480,7 @@ mod unit_tests {
         // not the actual capture quality.
         let wref = store.insert_window(NativeHandle::new(0)); // HWND 0 is invalid
 
-        match screenshot(&mut store, &wref, false) {
+        match screenshot(&mut store, &wref, false, None) {
             Ok(val) => {
                 let sid = val["capture"]["stateId"]
                     .as_str()

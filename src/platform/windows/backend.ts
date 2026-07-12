@@ -2,12 +2,13 @@ import { parseLookResponse, type LookResponse } from "../../outline.ts";
 import { toBoolean, toFiniteNumber, toOptionalString } from "../coerce.ts";
 import type { ComputerUsePlatformBackend, FramePoints, HelperActResult, PlatformActRequest, PlatformApp, PlatformFocusWindowResult, PlatformFrontmostResult, PlatformObserveRequest, PlatformReadTextRequest, PlatformReadTextResponse, PlatformReadyState, PlatformRoot, PlatformRootKind, PlatformRootQuery, PlatformTarget, PlatformWaitForRequest, PlatformWaitForResponse } from "../types.ts";
 import { WINDOWS_HELPER_PROTOCOL_VERSION, windowsHelper } from "./helper.ts";
+import { assertPlatformArchitecture } from "../architecture.ts";
 
 function normalizedProcessName(appName: string): string {
 	return appName.toLowerCase().replace(/\.exe$/i, "");
 }
 
-function classifyBrowser(appName: string): false | "chrome" | "edge" | "brave" {
+function classifyBrowser(appName: string): false | "chrome" | "edge" | "brave" | "firefox" | "vivaldi" | "opera" {
 	switch (normalizedProcessName(appName)) {
 		case "chrome":
 		case "chromium":
@@ -18,6 +19,13 @@ function classifyBrowser(appName: string): false | "chrome" | "edge" | "brave" {
 		case "brave":
 		case "brave-browser":
 			return "brave";
+		case "firefox":
+			return "firefox";
+		case "vivaldi":
+			return "vivaldi";
+		case "opera":
+		case "opera_gx":
+			return "opera";
 		default:
 			return false;
 	}
@@ -80,6 +88,7 @@ async function ensureReady(_ctx: unknown, state: PlatformReadyState, signal?: Ab
 	if (diagnostics?.protocolVersion !== WINDOWS_HELPER_PROTOCOL_VERSION) {
 		throw new Error(`Windows helper protocol mismatch: expected ${WINDOWS_HELPER_PROTOCOL_VERSION}, got ${diagnostics?.protocolVersion ?? "unknown"}. Restart Pi to use the installed helper.`);
 	}
+	assertPlatformArchitecture("Windows", diagnostics);
 	return { ...state, lastPermissionCheckAt: Date.now(), helperDiagnostics: diagnostics };
 }
 
@@ -91,7 +100,9 @@ export const windowsBackend: ComputerUsePlatformBackend = {
 		return appsFromRoots(parseRoots(await windowsHelper.command("listRoots", {}, { signal })));
 	},
 	async listRoots(query: PlatformRootQuery, signal?: AbortSignal): Promise<PlatformRoot[]> {
-		return parseRoots(await windowsHelper.command("listRoots", Number.isFinite(query.pid) ? { pid: Math.trunc(query.pid!) } : {}, { signal }));
+		const roots = parseRoots(await windowsHelper.command("listRoots", Number.isFinite(query.pid) ? { pid: Math.trunc(query.pid!) } : {}, { signal }));
+		const title = query.title?.trim().toLowerCase();
+		return title ? roots.filter((root) => root.title.trim().toLowerCase().includes(title)) : roots;
 	},
 	async getFrontmost(signal?: AbortSignal): Promise<PlatformFrontmostResult> {
 		const roots = parseRoots(await windowsHelper.command("listRoots", {}, { signal }));
@@ -103,10 +114,13 @@ export const windowsBackend: ComputerUsePlatformBackend = {
 		return await windowsHelper.command<PlatformFocusWindowResult>("focusWindow", { ...target }, { signal });
 	},
 	async observe(request: PlatformObserveRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<LookResponse> {
-		return parseLookResponse(await windowsHelper.command("look", { ...request.target, maxDimension: request.maxDimension, readText: request.readText, scopeRef: request.scopeRef, includeImage: request.includeImage }, options));
+		return parseLookResponse(await windowsHelper.command("look", { ...request.target, baseLookId: request.baseLookId, maxDimension: request.maxDimension, readText: request.readText, scopeRef: request.scopeRef, includeImage: request.includeImage }, options));
 	},
 	async act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
 		return await windowsHelper.command<HelperActResult>("act", { ...request }, options);
+	},
+	async actBatch(requests: PlatformActRequest[], options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
+		return await windowsHelper.command<HelperActResult>("actBatch", { actions: requests }, options);
 	},
 	async readText(args: PlatformReadTextRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformReadTextResponse> {
 		return await windowsHelper.command("uiaReadText", { ...args }, options);

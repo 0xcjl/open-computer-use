@@ -4,9 +4,7 @@ import ApplicationServices
 import Darwin
 import Vision
 import ImageIO
-#if PI_COMPUTER_USE_SCREEN_CAPTURE_KIT
 import ScreenCaptureKit
-#endif
 
 struct BridgeFailure: Error {
 	let message: String
@@ -25,8 +23,11 @@ final class AXRefStore {
 	private var windows: [String: AXUIElement] = [:]
 	private var elements: [String: AXUIElement] = [:]
 	private var snapshots: [String: Snapshot] = [:]
+	private let lock = NSLock()
 
 	func storeWindow(_ window: AXUIElement) -> String {
+		lock.lock()
+		defer { lock.unlock() }
 		for (ref, existing) in windows {
 			if CFEqual(existing, window) {
 				return ref
@@ -39,6 +40,8 @@ final class AXRefStore {
 	}
 
 	func storeElement(_ element: AXUIElement, snapshot: Snapshot? = nil) -> String {
+		lock.lock()
+		defer { lock.unlock() }
 		nextId += 1
 		let ref = "e\(nextId)"
 		elements[ref] = element
@@ -47,15 +50,21 @@ final class AXRefStore {
 	}
 
 	func window(for ref: String) -> AXUIElement? {
-		windows[ref]
+		lock.lock()
+		defer { lock.unlock() }
+		return windows[ref]
 	}
 
 	func element(for ref: String) -> AXUIElement? {
-		elements[ref]
+		lock.lock()
+		defer { lock.unlock() }
+		return elements[ref]
 	}
 
 	func snapshot(for ref: String) -> Snapshot? {
-		snapshots[ref]
+		lock.lock()
+		defer { lock.unlock() }
+		return snapshots[ref]
 	}
 }
 
@@ -102,6 +111,7 @@ private struct LookRecord {
 }
 
 private struct RootAXEvent {
+	let sequence: UInt64
 	let timestamp: TimeInterval
 	let notification: String
 	let element: AXUIElement?
@@ -110,7 +120,10 @@ private struct RootAXEvent {
 private final class RootAXObserverState {
 	let pid: Int32
 	let observer: AXObserver
+	let change = NSCondition()
+	var changeGeneration: UInt64 = 0
 	var events: [RootAXEvent] = []
+	var nextSequence: UInt64 = 1
 	var lastUsed: TimeInterval = Date().timeIntervalSince1970
 
 	init(pid: Int32, observer: AXObserver) {
@@ -356,21 +369,26 @@ final class InputSuppressionGuard {
 }
 
 final class Bridge {
-	private let protocolVersion = 5
+	private let protocolVersion = 6
 	private let refStore = AXRefStore()
 	private let inputSuppressionGuard = InputSuppressionGuard()
+	private let physicalInputLock = NSRecursiveLock()
 	private let browserBundleIds: Set<String> = [
 		"com.apple.Safari", "com.google.Chrome", "org.chromium.Chromium", "company.thebrowser.Browser", "com.brave.Browser", "com.microsoft.edgemac", "com.vivaldi.Vivaldi", "net.imput.helium", "org.mozilla.firefox",
 	]
 	private var enhancedAccessibilityPids = Set<Int32>()
+	private let enhancedAccessibilityLock = NSLock()
 	private var stdinBuffer = Data()
 	private var output = FileHandle.standardOutput
 	private var nextLookId: UInt64 = 0
 	private var lookRecords: [String: LookRecord] = [:]
 	private var lookRecordOrder: [String] = []
+	private let lookRecordLock = NSLock()
 	private let rootObserverLock = NSLock()
 	private var rootObservers: [Int32: RootAXObserverState] = [:]
 	private let maxRootObservers = 4
+	private let permissionCacheLock = NSLock()
+	private var grantedPermissionStatus: [String: Any]?
 
 	func run() {
 		if CommandLine.arguments.contains("serve") {
@@ -401,9 +419,18 @@ final class Bridge {
 
 	private func runServer(socketPath: String) {
 		try? FileManager.default.createDirectory(atPath: (socketPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+		// LaunchServices may race multiple `open -n` requests while the first
+		// daemon is still binding. Keep process ownership separate from socket
+		// cleanup so a late launcher can never unlink the live daemon's socket.
+		let lockPath = "\(socketPath).lock"
+		let lockFile = open(lockPath, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+		if lockFile < 0 || flock(lockFile, LOCK_EX | LOCK_NB) != 0 {
+			if lockFile >= 0 { close(lockFile) }
+			exit(0)
+		}
 		unlink(socketPath)
 		let server = socket(AF_UNIX, SOCK_STREAM, 0)
-		if server < 0 { exit(1) }
+		if server < 0 { close(lockFile); exit(1) }
 		var address = sockaddr_un()
 		address.sun_family = sa_family_t(AF_UNIX)
 		let sunPathCapacity = MemoryLayout.size(ofValue: address.sun_path)
@@ -416,21 +443,29 @@ final class Bridge {
 		let bindStatus = withUnsafePointer(to: &address) { pointer in
 			pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(server, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
 		}
-		if bindStatus != 0 || listen(server, 8) != 0 { close(server); exit(1) }
+		if bindStatus != 0 || listen(server, 8) != 0 { close(server); close(lockFile); exit(1) }
 		while true {
 			let client = accept(server, nil, nil)
 			if client < 0 { continue }
-			stdinBuffer.removeAll()
-			output = FileHandle(fileDescriptor: client, closeOnDealloc: true)
-			while true {
-				let data = output.availableData
-				if data.isEmpty { break }
-				stdinBuffer.append(data)
-				processBufferedInput()
-			}
-			output.closeFile()
-			output = FileHandle.standardOutput
+			Thread.detachNewThread { [weak self] in self?.processClient(client) }
 		}
+	}
+
+	private func processClient(_ client: Int32) {
+		let clientOutput = FileHandle(fileDescriptor: client, closeOnDealloc: true)
+		var buffer = Data()
+		let newline = Data([0x0A])
+		while true {
+			let data = clientOutput.availableData
+			if data.isEmpty { break }
+			buffer.append(data)
+			while let range = buffer.range(of: newline) {
+				let lineData = buffer.subdata(in: 0..<range.lowerBound)
+				buffer.removeSubrange(0..<range.upperBound)
+				if let line = String(data: lineData, encoding: .utf8), !line.isEmpty { handleLine(line, to: clientOutput) }
+			}
+		}
+		clientOutput.closeFile()
 	}
 
 	private func processBufferedInput() {
@@ -445,7 +480,7 @@ final class Bridge {
 		}
 	}
 
-	private func handleLine(_ line: String) {
+	private func handleLine(_ line: String, to responseOutput: FileHandle? = nil) {
 		let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard !trimmed.isEmpty else { return }
 
@@ -465,7 +500,7 @@ final class Bridge {
 					"id": id,
 					"ok": true,
 					"result": result,
-				])
+				], to: responseOutput)
 			} catch let failure as BridgeFailure {
 				send([
 					"id": id,
@@ -474,7 +509,7 @@ final class Bridge {
 						"message": failure.message,
 						"code": failure.code,
 					],
-				])
+				], to: responseOutput)
 			} catch {
 				send([
 					"id": id,
@@ -483,7 +518,7 @@ final class Bridge {
 						"message": error.localizedDescription,
 						"code": "internal_error",
 					],
-				])
+				], to: responseOutput)
 			}
 		} catch let failure as BridgeFailure {
 			send([
@@ -493,7 +528,7 @@ final class Bridge {
 					"message": failure.message,
 					"code": failure.code,
 				],
-			])
+			], to: responseOutput)
 		} catch {
 			send([
 				"id": fallbackId,
@@ -502,11 +537,11 @@ final class Bridge {
 					"message": error.localizedDescription,
 					"code": "internal_error",
 				],
-			])
+			], to: responseOutput)
 		}
 	}
 
-	private func send(_ payload: [String: Any]) {
+	private func send(_ payload: [String: Any], to responseOutput: FileHandle? = nil) {
 		guard JSONSerialization.isValidJSONObject(payload),
 			let data = try? JSONSerialization.data(withJSONObject: payload),
 			let line = String(data: data, encoding: .utf8)
@@ -515,7 +550,7 @@ final class Bridge {
 		}
 
 		if let out = (line + "\n").data(using: .utf8) {
-			output.write(out)
+			(responseOutput ?? output).write(out)
 		}
 	}
 
@@ -545,7 +580,7 @@ final class Bridge {
 		case "listWindows":
 			return try listWindows(pid: Int32(try intArg(request, "pid")))
 		case "listRoots":
-			return try listRoots(pid: optionalIntArg(request, "pid").map { Int32($0) })
+			return try listRoots(pid: optionalIntArg(request, "pid").map { Int32($0) }, title: optionalStringArg(request, "title"))
 		case "getFrontmost":
 			return try getFrontmost()
 		case "getUserContext":
@@ -564,6 +599,8 @@ final class Bridge {
 			return try look(request)
 		case "act":
 			return try act(request)
+		case "actBatch":
+			return try actBatch(request)
 		case "hitTest":
 			return try hitTest(request)
 		case "axWaitFor":
@@ -672,6 +709,8 @@ final class Bridge {
 		let parentPath = processPath(pid: parentPid)
 		var output: [String: Any] = [
 			"protocolVersion": protocolVersion,
+			"architectureVersion": 1,
+			"invariants": ["state-scoped-observations", "bounded-observation-history", "multi-root-forest", "progressive-disclosure", "atomic-physical-input", "concurrent-requests", "transactional-batching"],
 			"pid": Int32(getpid()),
 			"parentPid": parentPid,
 			"executablePath": CommandLine.arguments.first ?? "",
@@ -698,7 +737,6 @@ final class Bridge {
 	/// succeeds when THIS process can genuinely capture right now. When the
 	/// two disagree, the preflight boolean is the one lying.
 	private func screenRecordingCapturable() -> Bool {
-#if PI_COMPUTER_USE_SCREEN_CAPTURE_KIT
 		if #available(macOS 14.0, *) {
 			let semaphore = DispatchSemaphore(value: 0)
 			let capturable = Box<Bool>(false)
@@ -713,7 +751,6 @@ final class Bridge {
 			}
 			return capturable.value
 		}
-#endif
 		if #available(macOS 10.15, *) {
 			return CGPreflightScreenCaptureAccess()
 		}
@@ -757,6 +794,12 @@ final class Bridge {
 	}
 
 	private func checkPermissions() -> [String: Any] {
+		permissionCacheLock.lock()
+		if let cached = grantedPermissionStatus {
+			permissionCacheLock.unlock()
+			return cached
+		}
+		permissionCacheLock.unlock()
 		let accessibility = AXIsProcessTrusted()
 		let screenRecordingPreflight: Bool
 		if #available(macOS 10.15, *) {
@@ -765,7 +808,7 @@ final class Bridge {
 			screenRecordingPreflight = true
 		}
 		let capturable = screenRecordingCapturable()
-		return [
+		let result: [String: Any] = [
 			"accessibility": accessibility,
 			// The live probe is authoritative; the preflight boolean is kept
 			// for diagnostics (a true/false split identifies a stale cache or
@@ -775,6 +818,16 @@ final class Bridge {
 			"screenRecordingCapturable": capturable,
 			"source": permissionSource(),
 		]
+		// A successful TCC grant is process-stable in practice. Cache only the
+		// positive result so missing grants are always rechecked after the user
+		// enables them, while fresh agent processes avoid repeating a multi-second
+		// ScreenCaptureKit probe against the same long-lived helper daemon.
+		if accessibility && capturable {
+			permissionCacheLock.lock()
+			grantedPermissionStatus = result
+			permissionCacheLock.unlock()
+		}
+		return result
 	}
 
 	/// Register this process's identity with TCC for both grants so the app
@@ -1055,8 +1108,25 @@ final class Bridge {
 		["pairing": ["confidence": pairing.confidence, "score": pairing.score], "sheetCount": sheetCount]
 	}
 
-	private func listRoots(pid: Int32?) throws -> [String: Any] {
-		let apps = pid.map { [["pid": Int($0)]] } ?? listApps()
+	private func listRoots(pid: Int32?, title: String? = nil) throws -> [String: Any] {
+		let requestedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+		let apps: [[String: Any]]
+		if let pid {
+			apps = [["pid": Int(pid)]]
+		} else if !requestedTitle.isEmpty,
+			let entries = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] {
+			let matchingPids = Set(entries.compactMap { entry -> Int32? in
+				let candidate = ((entry[kCGWindowName as String] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+				guard candidate == requestedTitle || candidate.contains(requestedTitle) else { return nil }
+				return (entry[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
+			})
+			apps = listApps().filter { app in
+				guard let rawPid = app["pid"] as? Int else { return false }
+				return matchingPids.contains(Int32(rawPid))
+			}
+		} else {
+			apps = listApps()
+		}
 		var roots: [[String: Any]] = []
 		for app in apps {
 			guard let rawPid = app["pid"] as? Int else { continue }
@@ -1190,6 +1260,7 @@ final class Bridge {
 		let windowRef = optionalStringArg(request, "windowRef")
 		let maxDimension = optionalIntArg(request, "maxDimension").map { max(1, $0) }
 		let readText = optionalStringArg(request, "readText") ?? "auto"
+		let baseLookId = optionalStringArg(request, "baseLookId")
 		let includeImage = boolArg(request, "includeImage") ?? true
 		guard readText == "auto" || readText == "always" || readText == "never" else {
 			throw BridgeFailure(message: "readText must be auto, always, or never", code: "invalid_args")
@@ -1214,8 +1285,7 @@ final class Bridge {
 		ensureEnhancedAccessibility(pid: pid)
 		if let windowRef, windowRef.hasPrefix("cgmenu:"), refStore.window(for: windowRef) == nil {
 			let frame = windowId.flatMap { windowInfo(windowId: $0)?.bounds } ?? CGRect(x: 0, y: 0, width: 1, height: 1)
-			nextLookId += 1
-			let lookId = "look_\(nextLookId)"
+			let lookId = freshLookId()
 			storeLookRecord(LookRecord(lookId: lookId, windowId: windowId ?? 0, windowFrame: frame, imageWidth: max(1, Int(frame.width)), imageHeight: max(1, Int(frame.height)), hasImage: false))
 			let outline = LookNode(element: nil, ref: windowRef, role: "AXMenu", subrole: "", identifier: "", title: "Menu", description: "", value: "", actions: [], canPress: false, canFocus: false, canSetValue: false, canScroll: false, canIncrement: false, canDecrement: false, isTextInput: false, rect: CGRect(x: 0, y: 0, width: max(1, frame.width), height: max(1, frame.height)), pictureOnly: true)
 			return [
@@ -1277,9 +1347,16 @@ final class Bridge {
 			readTextMs = elapsedMs(textStart)
 		}
 
-		nextLookId += 1
-		let lookId = "look_\(nextLookId)"
-		storeLookRecord(LookRecord(lookId: lookId, windowId: windowId ?? 0, windowFrame: capture?.frame ?? rootFrame, imageWidth: imageWidth, imageHeight: imageHeight, hasImage: capture != nil))
+		let lookId = freshLookId()
+		let baseRecord = baseLookId.flatMap { lookRecord(for: $0) }
+		storeLookRecord(LookRecord(
+			lookId: lookId,
+			windowId: windowId ?? baseRecord?.windowId ?? 0,
+			windowFrame: baseRecord?.windowFrame ?? capture?.frame ?? rootFrame,
+			imageWidth: baseRecord?.imageWidth ?? imageWidth,
+			imageHeight: baseRecord?.imageHeight ?? imageHeight,
+			hasImage: baseRecord?.hasImage ?? (capture != nil)
+		))
 		let scale = (capture?.frame.width ?? rootFrame.width) > 0 ? Double(imageWidth) / (capture?.frame.width ?? rootFrame.width) : displayScaleFactor(for: rootFrame)
 		let pairing = pairingForWindow(window, pid: pid)
 		let role = stringAttribute(window, attribute: kAXRoleAttribute as CFString) ?? ""
@@ -1312,12 +1389,27 @@ final class Bridge {
 	}
 
 	private func storeLookRecord(_ record: LookRecord) {
+		lookRecordLock.lock()
+		defer { lookRecordLock.unlock() }
 		lookRecords[record.lookId] = record
 		lookRecordOrder.append(record.lookId)
 		while lookRecordOrder.count > 8 {
 			let oldest = lookRecordOrder.removeFirst()
 			lookRecords.removeValue(forKey: oldest)
 		}
+	}
+
+	private func freshLookId() -> String {
+		lookRecordLock.lock()
+		defer { lookRecordLock.unlock() }
+		nextLookId += 1
+		return "look_\(nextLookId)"
+	}
+
+	private func lookRecord(for lookId: String) -> LookRecord? {
+		lookRecordLock.lock()
+		defer { lookRecordLock.unlock() }
+		return lookRecords[lookId]
 	}
 
 	private func rectTransform(windowFrame: CGRect, imageWidth: Int, imageHeight: Int) -> (CGRect) -> CGRect {
@@ -1572,6 +1664,10 @@ final class Bridge {
 			"AXMenuClosed" as CFString,
 			"AXUIElementDestroyed" as CFString,
 			"AXFocusedWindowChanged" as CFString,
+			kAXValueChangedNotification as CFString,
+			kAXTitleChangedNotification as CFString,
+			kAXSelectedChildrenChangedNotification as CFString,
+			kAXLayoutChangedNotification as CFString,
 		]
 		var registered = false
 		let observedElements = [appElement] + axElementArray(appElement, attribute: kAXWindowsAttribute as CFString)
@@ -1606,23 +1702,55 @@ final class Bridge {
 		rootObserverLock.lock()
 		let state = rootObservers.values.first { CFEqual($0.observer, observer) }
 		if let state {
-			state.events.append(RootAXEvent(timestamp: Date().timeIntervalSince1970, notification: notification, element: element))
+			state.events.append(RootAXEvent(sequence: state.nextSequence, timestamp: Date().timeIntervalSince1970, notification: notification, element: element))
+			state.nextSequence += 1
 			if state.events.count > 64 { state.events.removeFirst(state.events.count - 64) }
 		}
 		rootObserverLock.unlock()
+		if let state {
+			state.change.lock()
+			state.changeGeneration += 1
+			state.change.broadcast()
+			state.change.unlock()
+		}
 	}
 
-	private func rootEventCursor(pid: Int32) -> Int {
+	private func rootChangeGeneration(pid: Int32) -> UInt64 {
 		rootObserverLock.lock()
-		defer { rootObserverLock.unlock() }
-		return rootObservers[pid]?.events.count ?? 0
+		let state = rootObservers[pid]
+		rootObserverLock.unlock()
+		guard let state else { return 0 }
+		state.change.lock()
+		defer { state.change.unlock() }
+		return state.changeGeneration
 	}
 
-	private func rootEvents(pid: Int32, since cursor: Int) -> [RootAXEvent] {
+	private func waitForRootChange(pid: Int32, since generation: UInt64, until deadline: Date) {
+		rootObserverLock.lock()
+		let state = rootObservers[pid]
+		rootObserverLock.unlock()
+		guard let state else {
+			Thread.sleep(forTimeInterval: min(0.2, max(0, deadline.timeIntervalSinceNow)))
+			return
+		}
+		state.change.lock()
+		if state.changeGeneration == generation {
+			_ = state.change.wait(until: min(deadline, Date().addingTimeInterval(0.2)))
+		}
+		state.change.unlock()
+	}
+
+	private func rootEventCursor(pid: Int32) -> UInt64 {
 		rootObserverLock.lock()
 		defer { rootObserverLock.unlock() }
-		guard let events = rootObservers[pid]?.events, cursor < events.count else { return [] }
-		return Array(events[cursor...])
+		return rootObservers[pid]?.nextSequence ?? 1
+	}
+
+	private func rootEvents(pid: Int32, since cursor: UInt64) -> [RootAXEvent] {
+		rootObserverLock.lock()
+		defer { rootObserverLock.unlock() }
+		guard let events = rootObservers[pid]?.events else { return [] }
+		return events.filter { $0.sequence >= cursor }
 	}
 
 	// Onscreen CGWindowList id set for one pid: ~1-2ms per call, so it can be
@@ -1665,7 +1793,7 @@ final class Bridge {
 
 	private func hitTest(_ request: [String: Any]) throws -> [String: Any] {
 		let lookId = try stringArg(request, "lookId")
-		guard let record = lookRecords[lookId] else {
+		guard let record = lookRecord(for: lookId) else {
 			throw BridgeFailure(message: "Look id '\(lookId)' is no longer available", code: "stale_look")
 		}
 		let point = lookPoint(record: record, x: try doubleArg(request, "x"), y: try doubleArg(request, "y"))
@@ -1677,7 +1805,7 @@ final class Bridge {
 
 	private func act(_ request: [String: Any]) throws -> [String: Any] {
 		let lookId = try stringArg(request, "lookId")
-		guard let record = lookRecords[lookId] else {
+		guard let record = lookRecord(for: lookId) else {
 			throw BridgeFailure(message: "Look id '\(lookId)' is no longer available", code: "stale_look")
 		}
 		let pid = Int32(try intArg(request, "pid"))
@@ -1685,27 +1813,47 @@ final class Bridge {
 		let target = request["target"] as? [String: Any] ?? [:]
 		let params = request["params"] as? [String: Any] ?? [:]
 		let policy = optionalStringArg(request, "policy") ?? "default"
+		let deferRootDelta = boolArg(request, "deferRootDelta") ?? false
 		let delivery = policy == "background" ? "pid" : ((params["delivery"] as? String) == "pid" ? "pid" : "hid")
+		var holdsPhysicalInput = false
+		func acquirePhysicalInputIfNeeded() {
+			if delivery == "hid" && !holdsPhysicalInput {
+				physicalInputLock.lock()
+				holdsPhysicalInput = true
+			}
+		}
+		defer { if holdsPhysicalInput { physicalInputLock.unlock() } }
 		var performed: [String: Any] = ["delivery": delivery]
 		var element: AXUIElement?
 		var rawPoint: CGPoint?
 		var preflightCapsUnknown = false
-		let eventsLive = ensureRootObserver(pid: pid)
+		let eventsLive = !deferRootDelta && ensureRootObserver(pid: pid)
 		let eventCursor = eventsLive ? rootEventCursor(pid: pid) : 0
-		let beforeRootSnapshot = rootMetadataSnapshot(pid: pid)
-		let beforeCgSignature = cgRootSignature(pid: pid)
-		let beforeFrontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+		let beforeRootSnapshot = deferRootDelta ? [:] : rootMetadataSnapshot(pid: pid)
+		let beforeCgSignature = deferRootDelta ? [] : cgRootSignature(pid: pid)
+		let beforeFrontmostPid = deferRootDelta ? nil : NSWorkspace.shared.frontmostApplication?.processIdentifier
 		let beforeSheetCount = windowElement(pid: pid, windowId: record.windowId).map { sheetElements(of: $0).count } ?? 0
 		let beforeFocusedWindow = focusedWindowSummary(pid: pid)
 		let beforeValue: String?
 		let beforeSelected: String?
+		func finish(_ response: [String: Any]) -> [String: Any] {
+			if deferRootDelta { return response }
+			return attachRootDelta(to: response, before: beforeRootSnapshot, beforeFrontmostPid: beforeFrontmostPid, pid: pid, eventsLive: eventsLive, eventCursor: eventCursor, beforeCgSignature: beforeCgSignature)
+		}
 
 		if let ref = target["ref"] as? String {
 			var refound = false
-			let resolved = refStore.element(for: ref) ?? {
+			let cached = refStore.element(for: ref)
+			let cachedIsLive = cached.map {
+				stringAttribute($0, attribute: kAXRoleAttribute as CFString) != nil && frameForElement($0) != nil
+			} ?? false
+			let resolved: AXUIElement?
+			if cachedIsLive {
+				resolved = cached
+			} else {
 				refound = true
-				return refindElement(ref: ref, pid: pid, windowId: record.windowId)
-			}()
+				resolved = refindElement(ref: ref, pid: pid, windowId: record.windowId)
+			}
 			guard let stored = resolved else {
 				throw BridgeFailure(message: "Element reference is stale", code: "stale_ref")
 			}
@@ -1732,24 +1880,44 @@ final class Bridge {
 			throw BridgeFailure(message: "No coordinate grounding is available", code: "coordinate_unavailable")
 		}
 
+		func focusTargetForPhysicalInput() {
+			guard delivery == "hid" else { return }
+			if let app = NSRunningApplication(processIdentifier: pid), !app.isActive {
+				performed["activated"] = app.activate()
+			}
+			if let window = windowElement(pid: pid, windowId: record.windowId) {
+				_ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+				_ = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+				performed["raised"] = AXUIElementPerformAction(window, kAXRaiseAction as CFString) == .success
+			}
+			usleep(20_000)
+		}
+
 		func preflight(_ point: CGPoint) throws {
 			guard let element else { preflightCapsUnknown = true; return }
-			guard let hit = hitTestElement(at: point) else { preflightCapsUnknown = true; return }
-			if sameElement(hit, element) || isElement(hit, descendantOf: element) || isElement(element, descendantOf: hit) { return }
-			let role = stringAttribute(hit, attribute: kAXRoleAttribute as CFString) ?? ""
-			if role == "AXWindow" || role == "AXApplication" { preflightCapsUnknown = true; return }
-			throw BridgeFailure(message: "Target is occluded by \(payloadNode(element: hit))", code: "occluded_target")
+			for attempt in 0..<4 {
+				guard let hit = hitTestElement(at: point) else { preflightCapsUnknown = true; return }
+				if sameElement(hit, element) || isElement(hit, descendantOf: element) || isElement(element, descendantOf: hit) { return }
+				let role = stringAttribute(hit, attribute: kAXRoleAttribute as CFString) ?? ""
+				if role == "AXWindow" || role == "AXApplication" { preflightCapsUnknown = true; return }
+				if delivery == "hid" && attempt < 3 {
+					focusTargetForPhysicalInput()
+					usleep(20_000)
+					continue
+				}
+				throw BridgeFailure(message: "Target is occluded by \(payloadNode(element: hit))", code: "occluded_target")
+			}
 		}
 
 		func executeCoordinates(_ point: CGPoint) throws {
-			guard record.hasImage else {
+			guard element != nil || record.hasImage else {
 				throw BridgeFailure(message: "Coordinate grounding is unavailable for this outline-only root", code: "coordinate_unavailable_for_root")
 			}
-			if policy == "ax_only" {
-				throw BridgeFailure(message: "AX-only policy blocks coordinate grounding", code: "coordinate_blocked")
-			}
 			performed["grounding"] = "coordinates"
-			try preflight(point)
+			if delivery == "pid" { performed["verification"] = "caller_required" }
+			acquirePhysicalInputIfNeeded()
+			focusTargetForPhysicalInput()
+			if delivery == "hid" { try preflight(point) }
 			switch action {
 			case "press", "click":
 				try postMouseClick(at: point, pid: pid, button: mouseButton(params["button"] as? String ?? "left"), clickCount: max(1, min(3, (params["clickCount"] as? NSNumber)?.intValue ?? 1)), delivery: delivery)
@@ -1773,9 +1941,23 @@ final class Bridge {
 			}
 		}
 
+		func refreshElement() -> AXUIElement? {
+			guard let ref = target["ref"] as? String,
+				let refreshed = refindElement(ref: ref, pid: pid, windowId: record.windowId)
+			else { return nil }
+			element = refreshed
+			performed["refound"] = true
+			return refreshed
+		}
+
 		if let element, action == "press" || action == "click" {
-			if supportsAction(element, action: kAXPressAction as CFString) {
-				let status = AXUIElementPerformAction(element, kAXPressAction as CFString)
+			if policy == "foreground" && hasAncestorRole(element, role: "AXWebArea") {
+				try executeCoordinates(coordinatePoint())
+			} else if supportsAction(element, action: kAXPressAction as CFString) {
+				var status = AXUIElementPerformAction(element, kAXPressAction as CFString)
+				if status != .success, let refreshed = refreshElement(), supportsAction(refreshed, action: kAXPressAction as CFString) {
+					status = AXUIElementPerformAction(refreshed, kAXPressAction as CFString)
+				}
 				if status == .success {
 					performed["grounding"] = "description"
 					performed["delivery"] = "ax"
@@ -1787,27 +1969,80 @@ final class Bridge {
 			}
 		} else if let element, action == "setText" {
 			let text = params["text"] as? String ?? ""
-			let status = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef)
+			if hasAncestorRole(element, role: "AXWebArea") {
+				acquirePhysicalInputIfNeeded()
+				focusTargetForPhysicalInput()
+				_ = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+				let currentValue = stringAttribute(element, attribute: kAXValueAttribute as CFString) ?? ""
+				var range = CFRange(location: 0, length: (currentValue as NSString).length)
+				let selected = AXValueCreate(.cfRange, &range).map {
+					AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, $0) == .success
+				} ?? false
+				if !selected {
+					try postKeyPress(keys: ["cmd", "a"], pid: pid, delivery: delivery)
+					usleep(20_000)
+				}
+				try postAtomicUnicodeText(text, pid: pid, delivery: delivery)
+				usleep(40_000)
+				let value = stringAttribute(element, attribute: kAXValueAttribute as CFString) ?? ""
+				performed["grounding"] = "keyboard-events"
+				performed["delivery"] = delivery
+				performed["selectionGrounding"] = selected ? "ax" : "keyboard"
+				return finish(["outcome": value == text ? "worked" : "didnt", "performed": performed, "evidence": ["value": value]])
+			}
+			var targetElement = element
+			var status = AXUIElementSetAttributeValue(targetElement, kAXValueAttribute as CFString, text as CFTypeRef)
+			if status != .success, let refreshed = refreshElement() {
+				targetElement = refreshed
+				status = AXUIElementSetAttributeValue(targetElement, kAXValueAttribute as CFString, text as CFTypeRef)
+			}
 			if status == .success {
 				performed["grounding"] = "description"
 				performed["delivery"] = "ax"
-				let value = stringAttribute(element, attribute: kAXValueAttribute as CFString) ?? ""
-				return attachRootDelta(to: ["outcome": value == text ? "worked" : "didnt", "performed": performed, "evidence": ["value": value]], before: beforeRootSnapshot, beforeFrontmostPid: beforeFrontmostPid, pid: pid, eventsLive: eventsLive, eventCursor: eventCursor, beforeCgSignature: beforeCgSignature)
+				let value = stringAttribute(targetElement, attribute: kAXValueAttribute as CFString) ?? ""
+				if value != text && policy != "foreground" {
+					throw BridgeFailure(message: "The background accessibility value write was accepted but did not take effect", code: "foreground_required")
+				}
+				return finish(["outcome": value == text ? "worked" : "didnt", "performed": performed, "evidence": ["value": value]])
 			}
 			try executeCoordinates(coordinatePoint())
 		} else if action == "typeText" {
-			if policy == "ax_only" {
-				throw BridgeFailure(message: "AX-only policy blocks raw text input", code: "coordinate_blocked")
+			if let element {
+				let focused = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+				if focused == .success { performed["focused"] = true }
 			}
-			try postUnicodeText(params["text"] as? String ?? "", pid: pid, delivery: delivery)
+			acquirePhysicalInputIfNeeded()
+			let text = params["text"] as? String ?? ""
+			try postUnicodeText(text, pid: pid, delivery: delivery)
 			performed["grounding"] = "coordinates"
-		} else if action == "keypress" {
-			if policy == "ax_only" {
-				throw BridgeFailure(message: "AX-only policy blocks raw key input", code: "coordinate_blocked")
+			if let element, !text.isEmpty {
+				usleep(30_000)
+				let afterValue = stringAttribute(element, attribute: kAXValueAttribute as CFString) ?? ""
+				let changed = afterValue != (beforeValue ?? "")
+				return finish(["outcome": changed ? "worked" : "didnt", "performed": performed, "evidence": ["value": afterValue, "valueChanged": changed]])
 			}
+		} else if action == "keypress" {
 			guard let keys = params["keys"] as? [String], !keys.isEmpty else {
 				throw BridgeFailure(message: "keypress requires keys", code: "invalid_args")
 			}
+			if let element {
+				let focused = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+				if focused == .success { performed["focused"] = true }
+				let normalizedKeys = keys.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+				if normalizedKeys.count == 2,
+					normalizedKeys.last == "a",
+					["cmd", "command", "meta"].contains(normalizedKeys.first ?? ""),
+					let value = stringAttribute(element, attribute: kAXValueAttribute as CFString)
+				{
+					var range = CFRange(location: 0, length: (value as NSString).length)
+					if let selection = AXValueCreate(.cfRange, &range),
+						AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, selection) == .success
+					{
+						performed["selectionGrounding"] = "ax"
+					}
+				}
+			}
+			acquirePhysicalInputIfNeeded()
 			try postKeyPress(keys: keys, pid: pid, delivery: delivery)
 			performed["grounding"] = "coordinates"
 		} else if let element, action == "scroll" {
@@ -1817,7 +2052,7 @@ final class Bridge {
 				performed["grounding"] = "description"
 				performed["delivery"] = "ax"
 				let after = scrollPositionSignature(element)
-				return attachRootDelta(to: ["outcome": before != after ? "worked" : "unknown", "performed": performed], before: beforeRootSnapshot, beforeFrontmostPid: beforeFrontmostPid, pid: pid, eventsLive: eventsLive, eventCursor: eventCursor, beforeCgSignature: beforeCgSignature)
+				return finish(["outcome": before != after ? "worked" : "unknown", "performed": performed])
 			}
 			try executeCoordinates(coordinatePoint())
 		} else {
@@ -1840,6 +2075,51 @@ final class Bridge {
 		if windowChanged { evidence["windowChanged"] = true }
 		var response: [String: Any] = ["outcome": outcome, "performed": performed]
 		if !evidence.isEmpty { response["evidence"] = evidence }
+		return finish(response)
+	}
+
+	private func actBatch(_ request: [String: Any]) throws -> [String: Any] {
+		guard let actions = request["actions"] as? [[String: Any]], !actions.isEmpty, actions.count <= 20 else {
+			throw BridgeFailure(message: "actBatch requires 1...20 actions", code: "invalid_args")
+		}
+		let pid = Int32(try intArg(actions[0], "pid"))
+		let lookId = try stringArg(actions[0], "lookId")
+		guard actions.allSatisfy({ ($0["pid"] as? NSNumber)?.int32Value == pid }) else {
+			throw BridgeFailure(message: "actBatch actions must target one pid", code: "invalid_args")
+		}
+		guard actions.allSatisfy({ ($0["lookId"] as? String) == lookId }) else {
+			throw BridgeFailure(message: "actBatch actions must belong to one look", code: "invalid_args")
+		}
+		let eventsLive = ensureRootObserver(pid: pid)
+		let eventCursor = eventsLive ? rootEventCursor(pid: pid) : 0
+		let beforeRootSnapshot = rootMetadataSnapshot(pid: pid)
+		let beforeCgSignature = cgRootSignature(pid: pid)
+		let beforeFrontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+		let mayUsePhysicalInput = actions.contains { action in
+			(optionalStringArg(action, "policy") ?? "default") != "ax_only"
+		}
+		if mayUsePhysicalInput { physicalInputLock.lock() }
+		defer { if mayUsePhysicalInput { physicalInputLock.unlock() } }
+
+		var steps: [[String: Any]] = []
+		var stoppedAt: Int?
+		for (index, action) in actions.enumerated() {
+			var deferred = action
+			deferred["deferRootDelta"] = true
+			do {
+				let step = try act(deferred)
+				steps.append(step)
+				if (step["outcome"] as? String) == "didnt" { stoppedAt = index; break }
+			} catch let failure as BridgeFailure {
+				steps.append(["outcome": "didnt", "error": ["code": failure.code, "message": failure.message]])
+				stoppedAt = index
+				break
+			}
+		}
+		let outcomes = steps.compactMap { $0["outcome"] as? String }
+		let outcome = outcomes.contains("didnt") ? "didnt" : (outcomes.contains("unknown") ? "unknown" : "worked")
+		var response: [String: Any] = ["outcome": outcome, "performed": ["transaction": true, "actionCount": steps.count], "steps": steps]
+		if let stoppedAt { response["stoppedAt"] = stoppedAt }
 		return attachRootDelta(to: response, before: beforeRootSnapshot, beforeFrontmostPid: beforeFrontmostPid, pid: pid, eventsLive: eventsLive, eventCursor: eventCursor, beforeCgSignature: beforeCgSignature)
 	}
 
@@ -1898,7 +2178,7 @@ final class Bridge {
 	// events can only accelerate the decision, never make it. A cheap
 	// CGWindowList id-set poll detects real-window appearance/closure early;
 	// the AX diff runs once at the first signal or at timeout.
-	private func attachRootDelta(to response: [String: Any], before: [String: [String: Any]], beforeFrontmostPid: pid_t?, pid: Int32, eventsLive: Bool, eventCursor: Int, beforeCgSignature: Set<UInt32>) -> [String: Any] {
+	private func attachRootDelta(to response: [String: Any], before: [String: [String: Any]], beforeFrontmostPid: pid_t?, pid: Int32, eventsLive: Bool, eventCursor: UInt64, beforeCgSignature: Set<UInt32>) -> [String: Any] {
 		var output = response
 		var performed = output["performed"] as? [String: Any] ?? [:]
 
@@ -1949,15 +2229,17 @@ final class Bridge {
 		let windowRef = optionalStringArg(request, "windowRef")
 		let role = optionalStringArg(request, "role")?.trimmingCharacters(in: .whitespacesAndNewlines)
 		let text = optionalStringArg(request, "text")?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+		let expectedValue = optionalStringArg(request, "value")?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 		let waitForGone = boolArg(request, "gone") ?? false
 		let timeoutMs = max(100, min(60_000, optionalIntArg(request, "timeoutMs") ?? 10_000))
 		let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
-		guard role?.isEmpty == false || text?.isEmpty == false else {
-			throw BridgeFailure(message: "axWaitFor requires role or text", code: "invalid_args")
+		guard role?.isEmpty == false || text?.isEmpty == false || expectedValue?.isEmpty == false else {
+			throw BridgeFailure(message: "axWaitFor requires role, text, or value", code: "invalid_args")
 		}
 		guard let window = windowElement(pid: pid, windowId: windowId, windowRef: windowRef) else {
 			return ["found": false, "reason": "window_not_found"]
 		}
+		_ = ensureRootObserver(pid: pid)
 
 		func matches(_ element: AXUIElement) -> Bool {
 			let candidateRole = self.stringAttribute(element, attribute: kAXRoleAttribute as CFString) ?? ""
@@ -1971,16 +2253,21 @@ final class Bridge {
 				].joined(separator: "\n").lowercased()
 				if !haystack.contains(text) { return false }
 			}
+			if let expectedValue, !expectedValue.isEmpty {
+				let subrole = self.stringAttribute(element, attribute: kAXSubroleAttribute as CFString) ?? ""
+				if self.displayValue(element, role: candidateRole, subrole: subrole).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != expectedValue { return false }
+			}
 			return true
 		}
 
 		var lastCount = 0
 		repeat {
+			let changeGeneration = rootChangeGeneration(pid: pid)
 			let descendants = collectDescendantsWithContext(startingAt: window, maxDepth: 12, maxNodes: 2000)
 			lastCount = descendants.count
 			if let match = descendants.first(where: { matches($0.element) }) {
 				if waitForGone {
-					Thread.sleep(forTimeInterval: 0.2)
+					waitForRootChange(pid: pid, since: changeGeneration, until: deadline)
 					continue
 				}
 				let candidateRole = self.stringAttribute(match.element, attribute: kAXRoleAttribute as CFString) ?? ""
@@ -1999,7 +2286,7 @@ final class Bridge {
 			if waitForGone {
 				return ["found": true, "gone": true, "nodeCount": lastCount]
 			}
-			Thread.sleep(forTimeInterval: 0.2)
+			waitForRootChange(pid: pid, since: changeGeneration, until: deadline)
 		} while Date() < deadline
 
 		return ["found": false, "timedOut": true, "nodeCount": lastCount]
@@ -2116,8 +2403,10 @@ final class Bridge {
 	}
 
 	private func ensureEnhancedAccessibility(pid: Int32) {
-		if enhancedAccessibilityPids.contains(pid) { return }
-		enhancedAccessibilityPids.insert(pid)
+		enhancedAccessibilityLock.lock()
+		let inserted = enhancedAccessibilityPids.insert(pid).inserted
+		enhancedAccessibilityLock.unlock()
+		if !inserted { return }
 		let appElement = AXUIElementCreateApplication(pid)
 		AXUIElementSetMessagingTimeout(appElement, 0.25)
 		let enhancedStatus = AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
@@ -2279,6 +2568,17 @@ final class Bridge {
 			if sameElement(candidate, ancestor) {
 				return true
 			}
+			current = parentElement(candidate)
+			depth += 1
+		}
+		return false
+	}
+
+	private func hasAncestorRole(_ element: AXUIElement, role: String) -> Bool {
+		var current: AXUIElement? = element
+		var depth = 0
+		while let candidate = current, depth < 30 {
+			if stringAttribute(candidate, attribute: kAXRoleAttribute as CFString) == role { return true }
 			current = parentElement(candidate)
 			depth += 1
 		}
@@ -2704,7 +3004,6 @@ final class Bridge {
 	}
 
 	private func captureWindow(windowId: UInt32) throws -> CapturedWindowImage {
-#if PI_COMPUTER_USE_SCREEN_CAPTURE_KIT
 		if #available(macOS 14.0, *) {
 			let semaphore = DispatchSemaphore(value: 0)
 			let capturedImage = Box<CGImage?>(nil)
@@ -2760,7 +3059,6 @@ final class Bridge {
 
 			return CapturedWindowImage(image: image, windowId: windowId, frame: currentWindowBounds(windowId: windowId) ?? CGRect(x: 0, y: 0, width: image.width, height: image.height))
 		}
-#endif
 		if let payload = try cgWindowScreenshotFallback(windowId: windowId) {
 			return payload
 		}
@@ -2828,11 +3126,9 @@ final class Bridge {
 	}
 
 	private func currentWindowBounds(windowId: UInt32) -> CGRect? {
-#if PI_COMPUTER_USE_SCREEN_CAPTURE_KIT
 		if #available(macOS 14.0, *), let scBounds = currentWindowBoundsViaScreenCaptureKit(windowId: windowId) {
 			return scBounds
 		}
-#endif
 		return windowInfo(windowId: windowId)?.bounds
 	}
 
@@ -2848,7 +3144,6 @@ final class Bridge {
 		return (pid, bounds)
 	}
 
-#if PI_COMPUTER_USE_SCREEN_CAPTURE_KIT
 	@available(macOS 14.0, *)
 	private func currentWindowBoundsViaScreenCaptureKit(windowId: UInt32) -> CGRect? {
 		let semaphore = DispatchSemaphore(value: 0)
@@ -2875,7 +3170,6 @@ final class Bridge {
 		}
 		return output.value
 	}
-#endif
 
 	private func eventDelivery(_ request: [String: Any]) -> String {
 		optionalStringArg(request, "delivery") == "pid" ? "pid" : "hid"
@@ -2902,6 +3196,8 @@ final class Bridge {
 	}
 
 	private func postMouseMove(to point: CGPoint, pid: Int32, delivery: String = "hid") throws {
+		if delivery == "hid" { physicalInputLock.lock() }
+		defer { if delivery == "hid" { physicalInputLock.unlock() } }
 		guard let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) else {
 			throw BridgeFailure(message: "Failed to create mouse move event", code: "input_failed")
 		}
@@ -2953,6 +3249,8 @@ final class Bridge {
 	}
 
 	private func postMouseClick(at point: CGPoint, pid: Int32, button: CGMouseButton = .left, clickCount: Int = 1, delivery: String = "hid") throws {
+		if delivery == "hid" { physicalInputLock.lock() }
+		defer { if delivery == "hid" { physicalInputLock.unlock() } }
 		try postMouseMove(to: point, pid: pid, delivery: delivery)
 		for index in 1...max(1, clickCount) {
 			guard let down = CGEvent(mouseEventSource: nil, mouseType: mouseDownType(for: button), mouseCursorPosition: point, mouseButton: button),
@@ -2972,6 +3270,8 @@ final class Bridge {
 	}
 
 	private func postMouseDrag(points: [CGPoint], pid: Int32, delivery: String = "hid") throws {
+		if delivery == "hid" { physicalInputLock.lock() }
+		defer { if delivery == "hid" { physicalInputLock.unlock() } }
 		guard points.count >= 2, let first = points.first else {
 			throw BridgeFailure(message: "Drag requires at least two points", code: "invalid_args")
 		}
@@ -2999,6 +3299,8 @@ final class Bridge {
 	}
 
 	private func postScrollWheel(at point: CGPoint, deltaX: Int, deltaY: Int, pid: Int32, delivery: String = "hid") throws {
+		if delivery == "hid" { physicalInputLock.lock() }
+		defer { if delivery == "hid" { physicalInputLock.unlock() } }
 		try postMouseMove(to: point, pid: pid, delivery: delivery)
 		guard let event = CGEvent(
 			scrollWheelEvent2Source: nil,
@@ -3064,6 +3366,8 @@ final class Bridge {
 	}
 
 	private func postKeyPress(keys: [String], pid: Int32, delivery: String = "hid") throws {
+		if delivery == "hid" { physicalInputLock.lock() }
+		defer { if delivery == "hid" { physicalInputLock.unlock() } }
 		if let chord = keyChord(keys) {
 			try postKey(chord.key, flags: chord.flags, pid: pid, delivery: delivery)
 			return
@@ -3083,6 +3387,8 @@ final class Bridge {
 	}
 
 	private func postKey(_ key: String, flags: CGEventFlags, pid: Int32, delivery: String = "hid") throws {
+		if delivery == "hid" { physicalInputLock.lock() }
+		defer { if delivery == "hid" { physicalInputLock.unlock() } }
 		guard let code = keyCode(key) else {
 			if key.count == 1 {
 				try postUnicodeText(key, pid: pid, delivery: delivery)
@@ -3098,13 +3404,19 @@ final class Bridge {
 		down.flags = flags
 		up.flags = flags
 		postEvent(down, pid: pid, delivery: delivery)
-		usleep(8_000)
 		postEvent(up, pid: pid, delivery: delivery)
+		usleep(8_000)
 	}
 
 	private func postUnicodeText(_ text: String, pid: Int32, delivery: String = "hid") throws {
+		if delivery == "hid" { physicalInputLock.lock() }
+		defer { if delivery == "hid" { physicalInputLock.unlock() } }
 		for scalar in text.unicodeScalars {
 			let char = String(scalar)
+			if let stroke = physicalKeyStroke(for: char) {
+				try postKey(stroke.key, flags: stroke.flags, pid: pid, delivery: delivery)
+				continue
+			}
 			guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
 				let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
 			else {
@@ -3113,8 +3425,45 @@ final class Bridge {
 			setUnicodeString(event: down, text: char)
 			setUnicodeString(event: up, text: char)
 			postEvent(down, pid: pid, delivery: delivery)
-			usleep(8_000)
 			postEvent(up, pid: pid, delivery: delivery)
+			usleep(8_000)
+		}
+	}
+
+	private func postAtomicUnicodeText(_ text: String, pid: Int32, delivery: String = "hid") throws {
+		if delivery == "hid" { physicalInputLock.lock() }
+		defer { if delivery == "hid" { physicalInputLock.unlock() } }
+		guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
+			let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
+		else { throw BridgeFailure(message: "Failed to create unicode text event", code: "input_failed") }
+		setUnicodeString(event: down, text: text)
+		setUnicodeString(event: up, text: text)
+		postEvent(down, pid: pid, delivery: delivery)
+		usleep(8_000)
+		postEvent(up, pid: pid, delivery: delivery)
+	}
+
+	/// Prefer physical key codes for characters represented by the US layout.
+	/// AppKit field editors can observe synthetic Unicode events without applying
+	/// them to the backing value, while normal key codes follow the same input
+	/// path as a user keystroke. Unicode synthesis remains the fallback for text
+	/// that has no direct key representation.
+	private func physicalKeyStroke(for character: String) -> (key: String, flags: CGEventFlags)? {
+		guard character.count == 1 else { return nil }
+		if character >= "a" && character <= "z" { return (character, []) }
+		if character >= "A" && character <= "Z" { return (character.lowercased(), [.maskShift]) }
+		if character >= "0" && character <= "9" { return (character, []) }
+		switch character {
+		case " ": return ("space", [])
+		case ".", ",", "/", "-", "=", ";", "'", "[", "]", "\\", "`": return (character, [])
+		case "_": return ("-", [.maskShift])
+		case "+": return ("=", [.maskShift])
+		case ":": return (";", [.maskShift])
+		case "\"": return ("'", [.maskShift])
+		case "?": return ("/", [.maskShift])
+		case "<": return (",", [.maskShift])
+		case ">": return (".", [.maskShift])
+		default: return nil
 		}
 	}
 
