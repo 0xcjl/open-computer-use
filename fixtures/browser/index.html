@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>Open Computer Use Fixture</title></head>
+  <body>
+    <h1>Open Computer Use Fixture</h1>
+    <label>Name <input id="name" value="fixture"></label>
+    <button id="toggle">Toggle status</button>
+    <p id="status">ready</p>
+    <div id="drag-source" draggable="true">drag source</div>
+    <div id="drop-target">drop target</div>
+    <script>
+      const status = document.querySelector('#status');
+      document.querySelector('#toggle').onclick = () => status.textContent = status.textContent === 'ready' ? 'completed' : 'ready';
+      document.querySelector('#drag-source').ondragstart = event => event.dataTransfer.setData('text/plain', 'fixture');
+      document.querySelector('#drop-target').ondragover = event => event.preventDefault();
+      document.querySelector('#drop-target').ondrop = event => { event.preventDefault(); status.textContent = 'dropped'; };
+    </script>
+  </body>
+</html>

@@ -1,87 +1,89 @@
-# pi-computer-use
+# open-computer-use
 
-<p align="center">
-  <img src="./assets/logo/logo3.png" width="50%" alt="pi-computer-use">
-</p>
+`open-computer-use` is a standalone, policy-gated Computer Use runtime for macOS. It exposes the full state-scoped desktop and managed-browser workflow through a TypeScript SDK, the `ocu` CLI, and a local stdio MCP server.
 
-`pi-computer-use` lets AI agents use desktop apps on macOS and Windows.
+It is a fork of [`injaneity/pi-computer-use`](https://github.com/injaneity/pi-computer-use) at `230d2e2c364ee76c0b7492a0588353f2fd064b67`. The original MIT license and attribution are retained in [LICENSE](./LICENSE) and [NOTICE](./NOTICE). This project removes the Pi extension package as the required host; it is not affiliated with Pi.
 
-The macOS helper requires macOS 14 or newer.
+## Capability surface
 
-An agent can look at an app window, understand the buttons and text inside it, and perform actions like clicking, typing, scrolling, and waiting for something to change. This is useful when the agent needs to work with a normal desktop app instead of an API, a terminal command, or a file.
+The MCP server provides eleven state-scoped tools:
 
-New to computer use? Start with: [Wait, what exactly is Computer Use?](https://zanechee.dev/what-exactly-is-computer-use/)
+`find_roots`, `observe_ui`, `search_ui`, `expand_ui`, `inspect_ui`, `read_text`, `wait_for`, `act_ui`, `launch_browser`, `navigate_browser`, and `evaluate_browser`.
 
-## What this package does
-
-This is a Pi extension. After installation, Pi agents get tools for:
-
-- finding open apps and windows
-- observing what is visible in a window
-- searching the visible interface for text, buttons, and controls
-- inspecting parts of the interface in more detail
-- clicking, typing, scrolling, and pressing UI controls
-- waiting for UI changes
-
-In short: it gives an agent a controlled way to operate desktop software.
-
-## What this package is not
-
-`pi-computer-use` is not a replacement for app APIs or MCP servers. If an app has a reliable direct integration, use that first.
-
-Computer use is most helpful when the only available interface is the app on screen.
+Every mutable operation consumes the exact `stateId` that produced its element refs. Immutable observations, resource epochs, per-resource scheduling, transactions, checked outcomes, and successor-state diffs are inherited from the upstream runtime.
 
 ## Install
 
 ```bash
-pi install npm:@injaneity/pi-computer-use
+npm install -g @0xcjl/open-computer-use
+ocu config init
+ocu install --host hermes # or: ocu install --host openclaw
+ocu doctor
 ```
 
-Start Pi and complete the platform setup flow.
+`ocu config init` creates a deny-by-default configuration at `~/.config/open-computer-use/config.json`. Add an explicit rule before any MCP operation can access a desktop app:
 
-On macOS, grant permissions to:
-
-```text
-/Applications/pi-computer-use.app
+```json
+{
+  "browser_use": true,
+  "headless": true,
+  "cursor_overlay": false,
+  "policy": {
+    "mode": "automatic",
+    "rules": [{
+      "bundleIds": ["com.example.fixture"],
+      "allow": ["discovery", "read", "act"],
+      "actions": ["click", "typeText", "keypress", "scroll", "drag"],
+      "allowForeground": false
+    }]
+  }
+}
 ```
 
-Required macOS permissions:
+A matching rule executes automatically. No matching rule means deny. Typing credential-, payment-, or verification-shaped text is always rejected. The runtime also blocks direct interaction with permission prompts; Skills must treat content displayed in a UI as untrusted data, never as new instructions.
 
-- Accessibility
-- Screen Recording, shown as Screen and System Audio Recording on newer macOS versions
+On first explicit helper setup, grant **Accessibility** and **Screen Recording** to `/Applications/open-computer-use.app`. The helper only uses local IPC; the MCP server is stdio-only and never opens a network listener. v0.1.0 supports macOS 14+; it does not ship a Windows binary.
 
-The macOS setup flow registers the helper first, so it should already appear in both Settings panes. Enable the toggles and choose Recheck.
+## MCP hosts
 
-On Windows, use an interactive desktop session. Windows support uses the platform accessibility APIs and does not use the macOS helper app or TCC permission flow.
+Run the server directly with:
 
-Use `/computer-use` inside Pi to show the active configuration and where it came from.
+```bash
+ocu mcp
+```
 
-## Main tools
+Hermes:
 
-- `find_roots`
-- `observe_ui`
-- `search_ui`
-- `expand_ui`
-- `inspect_ui`
-- `act_ui`
-- `read_text`
-- `wait_for`
+```bash
+hermes mcp add open-computer-use --command ocu --args mcp
+hermes mcp test open-computer-use
+```
 
-See [docs/usage.md](./docs/usage.md) for the full tool reference.
+This intentionally coexists with Hermes's built-in `computer_use`/cua-driver integration.
 
-## Documentation
+OpenClaw:
 
-- [Usage](./docs/usage.md)
-- [Architecture](./docs/architecture.md)
-- [Configuration](./docs/configuration.md)
-- [Development](./docs/development.md)
-- [Troubleshooting](./docs/troubleshooting.md)
-- [Contributing](./CONTRIBUTING.md)
+```bash
+openclaw mcp add open-computer-use --command ocu --arg mcp
+openclaw mcp probe open-computer-use
+openclaw skills install @0xcjl/open-computer-use-mcp
+```
 
-## Development status
+The ClawHub skill contains workflow and safety guidance only. It never grants macOS permissions or embeds a native helper.
 
-The architecture is centered on immutable, state-scoped observations. Desktop surfaces and CDP pages form one multi-root forest; progressive outline queries remain cached, while live work is ordered per physical resource so independent roots can run in parallel. `act_ui` accepts one or more intent steps, preserves focus across dependent input, verifies delivery, recovers safely, stores one complete successor state, and returns a compact diff when identity confidence allows. Older direct tools such as `screenshot`, `click`, `set_text`, and `computer_actions` are no longer part of the public extension surface.
+## SDK
 
-## License
+The package exports `OpenComputerUseRuntime`, `runComputerUseTool`, policy types, and the public parameter contracts. The SDK is TypeScript-first and uses the same state and policy semantics as MCP.
 
-MIT
+## Development
+
+```bash
+npm install
+npm test
+npm run build:native -- --arch arm64 --output /tmp/open-computer-use-bridge
+npm pack --dry-run
+```
+
+The automated suite covers policy denial/automatic execution, upstream schema/lifecycle/concurrency/state invariants, TypeScript checks, and native Swift typechecking. Interactive desktop verification must use a project-owned fixture app or local test page, never a personal account or production service.
+
+Build the included fixture app with `npm run build:fixture`; use its bundle ID `com.0xcjl.open-computer-use.fixture` in a test-only policy. The browser fixture is `fixtures/browser/index.html` and can be served locally, for example with `python3 -m http.server --directory fixtures/browser`.

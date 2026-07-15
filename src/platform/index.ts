@@ -2,7 +2,6 @@ import { macosBackend } from "./macos/backend.ts";
 import { isBrowserApp, isChromeFamilyApp, openBrowserLocationWithAppleScript } from "./macos/browser.ts";
 import { ensureMacosReady } from "./macos/permissions.ts";
 import type { ComputerUsePlatformBackend, PlatformName } from "./types.ts";
-import { windowsBackend } from "./windows/backend.ts";
 
 const macosPlatformBackend: ComputerUsePlatformBackend = {
 	name: "macos",
@@ -31,7 +30,7 @@ class UnsupportedPlatformBackend implements ComputerUsePlatformBackend {
 	}
 
 	private unsupported(): never {
-		throw new Error(`pi-computer-use does not support platform '${this.platform}' yet.`);
+		throw new Error(`open-computer-use v0.1 supports macOS only; '${this.platform}' is not available.`);
 	}
 
 	async ensureReady(): Promise<never> { this.unsupported(); }
@@ -50,7 +49,6 @@ class UnsupportedPlatformBackend implements ComputerUsePlatformBackend {
 
 export function platformBackendForRuntime(platform: NodeJS.Platform = process.platform): ComputerUsePlatformBackend {
 	if (platform === "darwin") return macosPlatformBackend;
-	if (platform === "win32") return windowsBackend;
 	return new UnsupportedPlatformBackend(platform);
 }
 

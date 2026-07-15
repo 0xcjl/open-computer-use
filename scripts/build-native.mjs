@@ -19,7 +19,7 @@ const archTriples = {
 };
 const deploymentTarget = "14.0";
 const frameworks = ["ApplicationServices", "AppKit", "ScreenCaptureKit", "Foundation", "SwiftUI"];
-const defaultCodeSignIdentifier = "com.injaneity.pi-computer-use";
+const defaultCodeSignIdentifier = "com.0xcjl.open-computer-use";
 
 async function exists(filePath) {
 	try {
@@ -67,7 +67,7 @@ function defaultOutputPath(arch) {
 }
 
 function moduleCachePath(arch) {
-	return path.join(os.tmpdir(), `pi-computer-use-swift-module-cache-${arch}`);
+	return path.join(os.tmpdir(), `open-computer-use-swift-module-cache-${arch}`);
 }
 
 function swiftArgsForArch(arch, outputPath) {
@@ -85,12 +85,12 @@ function swiftArgsForArch(arch, outputPath) {
 }
 
 async function signBinary(outputPath) {
-	if (hasArg("--no-sign") || process.env.PI_COMPUTER_USE_NO_SIGN === "1") {
+	if (hasArg("--no-sign") || process.env.OCU_NO_SIGN === "1") {
 		return;
 	}
 
-	const identity = getArg("--sign-identity") ?? process.env.PI_COMPUTER_USE_CODESIGN_IDENTITY ?? "-";
-	const identifier = getArg("--sign-identifier") ?? process.env.PI_COMPUTER_USE_CODESIGN_IDENTIFIER ?? defaultCodeSignIdentifier;
+	const identity = getArg("--sign-identity") ?? process.env.OCU_CODESIGN_IDENTITY ?? "-";
+	const identifier = getArg("--sign-identifier") ?? process.env.OCU_CODESIGN_IDENTIFIER ?? defaultCodeSignIdentifier;
 	const args = ["--force", "-i", identifier];
 	if (hasArg("--hardened-runtime")) {
 		args.push("--options", "runtime");
@@ -114,7 +114,7 @@ async function buildForArch(arch, outputPath) {
 }
 
 async function buildUniversal(outputPath) {
-	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-computer-use-build-"));
+	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "open-computer-use-build-"));
 	const x64Output = path.join(tempDir, "bridge-x64");
 	const arm64Output = path.join(tempDir, "bridge-arm64");
 	await buildForArch("x64", x64Output);

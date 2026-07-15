@@ -12,7 +12,9 @@ const HELPER_SETUP_TIMEOUT_MS = 60_000;
 const COMMAND_TIMEOUT_MS = 15_000;
 
 export const WINDOWS_HELPER_PROTOCOL_VERSION = 4;
-export const WINDOWS_HELPER_PATH = path.join(os.homedir(), ".pi", "agent", "helpers", "pi-computer-use", "windows-bridge.exe");
+// Windows is intentionally unsupported in v0.1. This path is retained only
+// for source compatibility while the future adapter is developed.
+export const WINDOWS_HELPER_PATH = path.join(os.homedir(), ".open-computer-use", "helpers", "windows-bridge.exe");
 
 interface Pending<T> {
 	resolve(value: T): void;
@@ -108,7 +110,7 @@ export class WindowsHelperClient {
 			this.pending.delete(parsed.id);
 			clearTimeout(pending.timer);
 			if (parsed.protocolVersion !== WINDOWS_HELPER_PROTOCOL_VERSION) {
-				pending.reject(new Error(`Windows helper protocol mismatch: expected ${WINDOWS_HELPER_PROTOCOL_VERSION}, got ${parsed.protocolVersion ?? "unknown"}. Restart Pi to use the installed helper.`));
+				pending.reject(new Error(`Windows helper protocol mismatch: expected ${WINDOWS_HELPER_PROTOCOL_VERSION}, got ${parsed.protocolVersion ?? "unknown"}. Restart the helper to use the installed build.`));
 			} else if (parsed.ok === true) {
 				pending.resolve(parsed.result);
 			} else {

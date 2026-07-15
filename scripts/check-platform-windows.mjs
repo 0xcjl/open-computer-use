@@ -5,12 +5,7 @@ import { assertPlatformArchitecture, PLATFORM_ARCHITECTURE_VERSION, REQUIRED_PLA
 
 const win = platformBackendForRuntime("win32");
 assert.equal(win.name, "windows");
-assert.equal(typeof win.ensureReady, "function");
-assert.equal(typeof win.listApps, "function");
-assert.equal(typeof win.listRoots, "function");
-assert.equal(typeof win.observe, "function");
-assert.equal(typeof win.act, "function");
-assert.equal(typeof win.actBatch, "function");
+await assert.rejects(win.ensureReady(), /macOS only/);
 
 const mac = platformBackendForRuntime("darwin");
 assert.equal(mac.name, "macos");

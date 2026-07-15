@@ -1,11 +1,13 @@
 import { existsSync, readFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_POLICY, type RuntimePolicy } from "./policy.ts";
 
 export interface ComputerUseConfig {
 	browser_use: boolean;
 	headless: boolean;
 	cursor_overlay: boolean;
+	policy: RuntimePolicy;
 }
 
 export interface ComputerUseConfigSource {
@@ -25,6 +27,7 @@ const DEFAULT_CONFIG: ComputerUseConfig = {
 	browser_use: true,
 	headless: false,
 	cursor_overlay: true,
+	policy: DEFAULT_POLICY,
 };
 
 let activeConfig: ComputerUseConfig = { ...DEFAULT_CONFIG };
@@ -47,9 +50,11 @@ function normalizePartial(raw: unknown): Partial<ComputerUseConfig> {
 	const browserUse = parseBoolean((source as any).browser_use);
 	const headless = parseBoolean((source as any).headless);
 	const cursorOverlay = parseBoolean((source as any).cursor_overlay);
+	const policy = (source as any).policy;
 	if (browserUse !== undefined) out.browser_use = browserUse;
 	if (headless !== undefined) out.headless = headless;
 	if (cursorOverlay !== undefined) out.cursor_overlay = cursorOverlay;
+	if (policy && typeof policy === "object" && policy.mode === "automatic" && Array.isArray(policy.rules)) out.policy = policy as RuntimePolicy;
 	return out;
 }
 
@@ -65,9 +70,9 @@ function readConfigFile(filePath: string): ComputerUseConfigSource {
 
 function readEnv(): Partial<ComputerUseConfig> {
 	const out: Partial<ComputerUseConfig> = {};
-	const browserUse = parseBoolean(process.env.PI_COMPUTER_USE_BROWSER_USE);
-	const headless = parseBoolean(process.env.PI_COMPUTER_USE_HEADLESS);
-	const cursorOverlay = parseBoolean(process.env.PI_COMPUTER_USE_CURSOR_OVERLAY);
+	const browserUse = parseBoolean(process.env.OCU_BROWSER_USE);
+	const headless = parseBoolean(process.env.OCU_HEADLESS);
+	const cursorOverlay = parseBoolean(process.env.OCU_CURSOR_OVERLAY);
 	if (browserUse !== undefined) out.browser_use = browserUse;
 	if (headless !== undefined) out.headless = headless;
 	if (cursorOverlay !== undefined) out.cursor_overlay = cursorOverlay;
@@ -76,8 +81,8 @@ function readEnv(): Partial<ComputerUseConfig> {
 
 export function loadComputerUseConfig(cwd: string): LoadedComputerUseConfig {
 	const sources = [
-		readConfigFile(path.join(getAgentDir(), "extensions", "pi-computer-use.json")),
-		readConfigFile(path.join(cwd, ".pi", "computer-use.json")),
+		readConfigFile(process.env.OCU_CONFIG ?? path.join(os.homedir(), ".config", "open-computer-use", "config.json")),
+		readConfigFile(path.join(cwd, ".open-computer-use", "config.json")),
 	];
 	const env = readEnv();
 	const config = { ...DEFAULT_CONFIG };

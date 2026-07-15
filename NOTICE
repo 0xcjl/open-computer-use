@@ -1,0 +1,7 @@
+open-computer-use is a fork of injaneity/pi-computer-use at
+230d2e2c364ee76c0b7492a0588353f2fd064b67 (v0.4.3 baseline).
+
+Upstream copyright (c) 2026 Zane Chee. Upstream source is licensed under
+the MIT License; its LICENSE file and this attribution are retained in this
+distribution. Changes in this repository remove the Pi extension packaging
+and add a standalone TypeScript SDK, stdio MCP server, CLI, and agent skills.
